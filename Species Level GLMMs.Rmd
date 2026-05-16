@@ -1,0 +1,1288 @@
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(vegan)
+library(glmmTMB)
+library(DHARMa)
+library(effects)
+library(emmeans)
+library(openxlsx)
+library(car)
+```
+
+
+```{r}
+#Import the bird data set using the read.csv command####
+#birds_2014 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/test.csv")
+birds_2015 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2015-ASSEMBLE.csv")
+birds_2016 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2016_assemble.csv")
+birds_2017 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2017_assemble.csv")
+birds_2018 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2018_assemble.csv")
+birds_2019 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2019-ASSEMBLE.csv")
+birds_2021 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2021.csv")
+birds_2024 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2024-ASSEMBLE.csv")
+
+#Remove all extra columns void of information####
+#Compares left of %in% to the right, if matching, because of "!", the code returns it as FALSE and removes it from the dataframe.
+birds_2015 <- birds_2015[, !(names(birds_2015) %in% paste0("X.", 15))]
+birds_2016 <- birds_2016[, !(names(birds_2016) %in% paste0("X.", 15))]
+birds_2017 <- birds_2017[, !(names(birds_2017) %in% paste0("X.", 15))]
+birds_2018 <- birds_2018[, !(names(birds_2018) %in% paste0("X.", 15))]
+birds_2019 <- birds_2019[, !(names(birds_2019) %in% paste0("X.", 15))]
+birds_2021 <- birds_2021[, !(names(birds_2021) %in% paste0("X.", 15))]
+birds_2024 <- birds_2024[, !(names(birds_2024) %in% paste0("X.", 15))]
+
+#REMOVING TRANSIT DATA####
+#Create a function, create a loop, apply that function and save each year in a list
+remove_obs <- function(df, column) {
+  df[!df[[column]] %in% c("TOTAL", "Vol", "en chemin", ">200m","Vol (<200m)", ""),] #"Vol (<200m)" and "" or smth
+} #df is the dataframe, column is the columns the name of the column to filter by. Matches on both sides of the %in% and removes it due to the "!".
+
+#Create a list of all your yearly datasets, "data" is the name of the dataset, "col" is the desired column you would like to filter
+birds_list <- list(
+  #birds_2014 = list(data = birds_2014, col = "X.14"),
+  birds_2015 = list(data = birds_2015, col = "X.14"),
+  birds_2016 = list(data = birds_2016, col = "X.14"),
+  birds_2017 = list(data = birds_2017, col = "X.14"),
+  birds_2018 = list(data = birds_2018, col = "X.14"),
+  birds_2019 = list(data = birds_2019, col = "X.14"),
+  birds_2021 = list(data = birds_2021, col = "X.14"),
+  birds_2024 = list(data = birds_2024, col = "X.14")
+)
+
+for(i in names(birds_list)){
+  birds_list[[i]]$data <- remove_obs(birds_list[[i]]$data, birds_list[[i]]$col)
+}
+
+#names(birds_list) → gives the names of each list element: "birds_2014", "birds_2015", etc.
+  #for(i in names(birds_list)) → loops over each dataset.
+    #birds_list[[i]]$data → selects the dataframe for the current year.
+      #birds_list[[i]]$col → selects the column name to filter by.
+        #remove_obs(...) → applies the filtering function.
+          #<- → replaces the old dataframe with the cleaned version.
+
+new_colnames <- c(
+  "Subsite","Site","Type (Restauration active / passive / control)","julian_day",
+  "Date","Heure debut","1er ou 2e passage",
+  "cloudiness", "rain", "wind", "visibility", "surface_water",
+  "Observer Name","Department","Distance"
+)
+
+birds_list <- lapply(birds_list, function(x) {
+  names(x$data)[1:length(new_colnames)] <- new_colnames
+  return(x)
+})
+
+head(birds_list$birds_2015$data)
+```
+
+```{r}
+#Removing repeated header rows#### 
+
+#1. Extract the cleaned dataframes from the list
+cleaned_dfs <- lapply(birds_list, function(x) x$data)
+
+cleaned_dfs <- lapply(cleaned_dfs, function(df) {
+  df[-1, ]  # remove the first row
+})
+
+#2. Identify all columns across all years
+all_cols <- unique(unlist(lapply(cleaned_dfs, names)))
+
+#3. Ensure all dataframes have the same columns
+# If a column doesn’t exist in a year, fill with NA
+standardize_cols <- function(df, all_cols) {
+  missing_cols <- setdiff(all_cols, names(df))
+  if(length(missing_cols) > 0){
+    df[missing_cols] <- NA  # add missing columns
+  }
+  df <- df[all_cols]        # reorder columns consistently
+  return(df)
+}
+cleaned_dfs <- lapply(cleaned_dfs, standardize_cols, all_cols = all_cols)
+
+#4. Combine all years into a single dataset
+birds_all_years <- do.call(rbind, cleaned_dfs)
+
+birds_all_years$Subsite <- gsub("Platelet\\s+","Platelet", birds_all_years$Subsite)
+
+
+head(birds_all_years)
+```
+
+```{r}
+#Converting numeric weather variables####
+
+# Convert surface_water values to numeric
+birds_all_years$surface_water <- as.numeric(gsub("%", "", birds_all_years$surface_water)) / 100
+
+# Convert other weather columns to numeric
+climate_cols <- c("cloudiness", "rain", "wind", "visibility")
+birds_all_years[, climate_cols] <- lapply(birds_all_years[, climate_cols], function(x) as.numeric(as.character(x)))
+```
+
+```{r}
+#CREATING DATASET FOR SURFACE_WATER TREND ANALYSIS####
+
+# Ensure numeric and factor columns
+birds_all_years <- birds_all_years %>%
+  mutate(
+    Date = as.Date(Date, format="%m/%d/%Y"),
+    Site = as.factor(Site),
+    `1er ou 2e passage` = as.factor(`1er ou 2e passage`)
+  )
+birds_all_years <- birds_all_years %>%
+  mutate(
+    year = format(Date, "%Y"),
+    .after = Date
+  ) %>%
+  relocate(site = Site, passage = `1er ou 2e passage`, .after = year)
+
+birds_all_years <- birds_all_years %>%
+  filter(!is.na(year) & !is.na(Subsite))
+
+```
+
+```{r}
+library(tidyr)
+#Extracting Species Data into long format####
+
+# Metadata columns
+meta_names <- 1:16
+
+# Species columns
+species_cols <- (17:ncol(birds_all_years))
+
+birds_long <- birds_all_years %>%
+  pivot_longer(
+    cols = all_of(species_cols),
+    names_to = "species",
+    values_to = "abundance"
+  )
+birds_long <- birds_long %>%
+  mutate(
+    abundance = trimws(abundance),              # remove spaces
+    abundance = ifelse(abundance == "", NA, abundance),
+    abundance = as.numeric(abundance)           # convert to numeric
+  )
+
+species_tobe_removed <- birds_long %>%
+  group_by(species) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE)) %>%
+  filter(total_abundance == 0) %>%
+  pull(species)
+
+birds_long <- birds_long %>%
+  filter(!species %in% species_tobe_removed)  
+
+```
+
+```{r}
+#REMOVING NON-BREEDING SPECIES####
+species_info <- read_excel("C:/Users/Lenovo/Documents/BTR/Bird_Data/Espece nicheur-revMT.xlsx")
+
+species_info <- species_info %>%
+  rename(
+    species = Noms.Especes,
+    migrant = `Migrant/Vagrant`
+  )
+
+birds_filtered <- birds_long %>%
+  left_join(species_info, by = "species")
+
+birds_filtered <- birds_filtered %>%
+  filter(!grepl("^1", migrant) | is.na(migrant))
+
+birds_filtered <- birds_filtered %>%
+  mutate(line_id = paste(Subsite, Date, passage, sep = "_"))
+
+birds_filtered$Subsite <- gsub("Enfores", "Enfor", birds_filtered$Subsite)
+```
+
+```{r}
+birds_2024 <- birds_2024[-1, ]
+names(birds_2024)[1] <- "Subsite"
+names(birds_2024)[3] <- "Type de Restauration"
+
+
+birds_2024 <- birds_2024 %>%
+  mutate(
+    `Type de Restauration` = case_when(
+      `Type de Restauration` %in% c("Témoin (Bélugue, DPM)") ~ "Control",
+      `Type de Restauration` == "Anciens salins - passif" ~ "Passive",
+      `Type de Restauration` == "Anciens salins - actif" ~ "Active",
+      `Type de Restauration` == "anciens salins - actif" ~ "Active",
+      TRUE ~ `Type de Restauration`  # keep everything else unchanged
+    )
+  )
+
+control <- birds_2024%>%
+  select(Subsite, `Type de Restauration`)
+
+control_unique <- control %>%
+  select(Subsite, `Type de Restauration`) %>%
+  distinct()
+
+birds_filtered  <- left_join(birds_filtered, control_unique, by = "Subsite")
+birds_filtered$restauration <- birds_filtered$`Type de Restauration`
+
+birds_filtered$julian_day <- as.numeric(as.character(birds_filtered$julian_day))
+
+```
+
+```{r}
+#TRANSLATING BIRD SPECIES####
+species_translation <- c(
+  "Epervier.d.Europe" = "Eurasian Sparrowhawk",
+  "Rousserolle.turdoïde" = "Great Reed Warbler",
+  "Rousserolle.effarvatte" = "Eurasian Reed Warbler",
+  "Alouette.des.champs" = "Eurasian Skylark",
+  "Martin.pêcheur.d.Europe" = "Common Kingfisher",
+  "Perdrix.rouge" = "Red-legged Partridge",
+  "Canard.colvert" = "Mallard",
+  "Canard.chipeau" = "Gadwall",
+  "Pipit.rousseline" = "Tawny Pipit",
+  "Héron.cendré" = "Grey Heron",
+  "Héron.pourpré" = "Purple Heron",
+  "Crabier.chevelu" = "Squacco Heron",
+  "Héron.garde.bœufs" = "Cattle Egret",
+  "Oedicnème.criard" = "Eurasian Stone-curlew",
+  "Buse.variable" = "Common Buzzard",
+  "Linotte.mélodieuse" = "Common Linnet",
+  "Chardonneret.élégant" = "European Goldfinch",
+  "Bouscarle.de.Cetti" = "Cetti's Warbler",
+  "Gravelot.à.collier.interrompu" = "Kentish Plover",
+  "Busard.cendré" = "Montagu's Harrier",
+  "Cisticole.des.joncs" = "Zitting Cisticola",
+  "Coucou.geai" = "Great Spotted Cuckoo",
+  "Pigeon.ramier" = "Common Wood Pigeon",
+  "Corneille.noire" = "Carrion Crow",
+  "Coucou.gris" = "Common Cuckoo",
+  "Cygne.tuberculé" = "Mute Swan",
+  "Grande.Aigrette" = "Great Egret",
+  "Aigrette.garzette" = "Little Egret",
+  "Faucon.crécerelle" = "Common Kestrel",
+  "Foulque.macroule" = "Eurasian Coot",
+  "Gallinule.poule.d.eau" = "Common Moorhen",
+  "Cochevis.huppé" = "Crested Lark",
+  "Huîtrier.pie" = "Eurasian Oystercatcher",
+  "Echasse.blanche" = "Black-winged Stilt",
+  "Hypolaïs.polyglotte" = "Melodious Warbler",
+  "Hirondelle.rustique" = "Barn Swallow",
+  "Goéland.railleur" = "Slender-billed Gull",
+  "Mouette.mélanocéphale" = "Mediterranean Gull",
+  "Goéland.leucophée" = "Yellow-legged Gull",
+  "Mouette.rieuse" = "Black-headed Gull",
+  "Rossignol.philomèle" = "Common Nightingale",
+  "Guêpier.d.Europe" = "European Bee-eater",
+  "Bruant.proyer" = "Corn Bunting",
+  "Milan.noir" = "Black Kite",
+  "Bergeronnette.printanière" = "Western Yellow Wagtail",
+  "Nette.rousse" = "Red-crested Pochard",
+  "Bihoreau.gris" = "Black-crowned Night Heron",
+  "Loriot.d.Europe" = "Eurasian Golden Oriole",
+  "Mésange.charbonnière" = "Great Tit",
+  "Moineau.domestique" = "House Sparrow",
+  "Moineau.friquet" = "Eurasian Tree Sparrow",
+  "Grand.Cormoran" = "Great Cormorant",
+  "Faisan.de.Colchide" = "Common Pheasant",
+  "Flamant.rose" = "Greater Flamingo",
+  "Pie.bavarde" = "Eurasian Magpie",
+  "Spatule.blanche" = "Eurasian Spoonbill",
+  "Grèbe.huppé" = "Great Crested Grebe",
+  "Râle.d.eau" = "Water Rail",
+  "Avocette.élégante" = "Pied Avocet",
+  "Tarier.pâtre" = "European Stonechat",
+  "Sterne.naine" = "Little Tern",
+  "Sterne.pierregarin" = "Common Tern",
+  "Tourterelle.turque" = "Eurasian Collared Dove",
+  "Tourterelle.des.bois" = "European Turtle Dove",
+  "Etourneau.sansonnet" = "Common Starling",
+  "Fauvette.à.tête.noire" = "Eurasian Blackcap",
+  "Fauvette.à.lunettes" = "Spectacled Warbler",
+  "Fauvette.mélanocéphale" = "Sardinian Warbler",
+  "Grèbe.castagneux" = "Little Grebe",
+  "Tadorne.de.Belon" = "Common Shelduck",
+  "Chevalier.gambette" = "Common Redshank",
+  "Merle.noir" = "Common Blackbird",
+  "Huppe.fasciée" = "Eurasian Hoopoe",
+  "Sterne.Hansel" = "Gull-billed Tern",
+  "Vanneau.huppé" = "Northern Lapwing",
+  "Ibis.falcinelle" = "Glossy Ibis",
+  "Lusciniole.à.moustaches" = "Moustached Warbler",
+  "Caille.des.blés" = "Common Quail",
+  "Serin.cini" = "European Serin",
+  "Grand.duc.d.Europe" = "Eurasian Eagle-Owl",
+  "Talève.sultane" = "Purple Swamphen",
+  "Verdier.d.Europe" = "European Greenfinch",
+  "Blongios.nain" = "Little Bittern"
+)
+
+birds_filtered$species <- species_translation[birds_filtered$species]
+```
+
+```{r}
+unique(birds_filtered$species)
+```
+```{r}
+# Create a dataframe of unique species
+species_table <- data.frame(
+  species = sort(unique(birds_filtered$species))
+)
+
+# View table
+species_table
+
+# Export to Excel
+library(openxlsx)
+
+write.xlsx(
+  species_table,
+  file = "species_list.xlsx",
+  rowNames = FALSE
+)
+```
+
+```{r}
+citation("glmmTMB")
+
+toBibtex(citation("FD"))
+```
+
+
+```{r}
+#Vegetation cover!!!#####
+vegetation_cover <- read.csv("C:/Users/Lenovo/Documents/BTR/Statistics/vegetation_cover_corr.csv")
+names(vegetation_cover)[2] <- "initial_cover"
+names(vegetation_cover)[3] <- "final_cover"
+
+setdiff(birds_filtered$Subsite, vegetation_cover$Subsite)
+setdiff(vegetation_cover$Subsite, birds_filtered$Subsite)
+length(intersect(birds_filtered$Subsite, vegetation_cover$Subsite))
+
+vegetation_cover$initial_cover <- as.numeric(gsub("%", "", vegetation_cover$initial_cover))
+vegetation_cover$final_cover <- as.numeric(gsub("%", "", vegetation_cover$final_cover))
+vegetation_cover$Change <- as.numeric(gsub("%", "", vegetation_cover$Change))
+
+library(dplyr)
+
+birds_filtered <- birds_filtered %>%
+  left_join(vegetation_cover, by = "Subsite")
+```
+
+```{r}
+#TEST NBINOM2####
+library(ggplotify)
+library(patchwork)
+library(gridExtra)
+library(grid)
+
+list <- unique(birds_filtered$species)
+
+pdf("glmm_final_nbinom_species_finalnbinom2.pdf")
+L_trend <- list()
+for(i in list){
+  
+  #create dataset
+  bird <- birds_filtered %>% 
+  filter(species == i)
+  bird$year_num <- as.numeric(as.character(bird$year))
+  
+  #filter out if sum abundance(restauration = 0)
+  
+  sum_passive <- bird %>%
+    filter(restauration == "Passive")
+  sum_passive <- sum(sum_passive$abundance, na.rm = TRUE)
+  
+  sum_active <- bird %>%
+    filter(restauration == "Active")
+  sum_active <- sum(sum_active$abundance, na.rm = TRUE)
+  
+  sum_control <- bird %>%
+    filter(restauration == "Control")
+  sum_control <- sum(sum_control$abundance, na.rm = TRUE)
+  
+ 
+   if(sum_passive == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Passive") #| = or
+  }
+  
+  if(sum_active == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Active") #| = or
+  } 
+  
+  if(sum_control == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Control") #| = or
+  }
+  
+  bird_abundance_check <- bird %>%
+  filter(abundance != 0) %>%
+  group_by(restauration, year) %>%
+  group_by(restauration) %>%
+  summarise(n_years = n_distinct(year), .groups = "drop")
+  
+  for(idx in seq_along(bird_abundance_check$n_years)){
+    
+    if(bird_abundance_check$n_years[idx] < 2){
+      
+      rest_rm <- bird_abundance_check$restauration[idx]
+      
+      bird <- bird %>%
+        filter_out(restauration == rest_rm)
+    }}
+
+  
+  #GLMM equation
+   bird_mod <- tryCatch({ 
+    glmmTMB(
+      abundance ~ log(surface_water + 1) + year_num*restauration +
+        cloudiness + wind + (1 | site/Subsite),
+      family = nbinom2(),
+      data = bird
+    )
+  }, error = function(e) {
+    message(paste("Model failed for:", i))
+    return(NULL)
+  })
+   
+   if(is.null(bird_mod)){
+     next
+   }
+   
+   hexian_warning <- as.numeric(logLik(bird_mod))
+   
+   if(is.na(hexian_warning)){
+     next
+   }
+   
+   #Stats
+   stats <- tryCatch({
+  car::Anova(bird_mod)
+}, error = function(e) {
+  message(paste("Anova failed for:", i))
+  return(NULL)
+})
+   
+    if(is.null(stats)){
+     next
+   }
+
+   bird_mod
+   
+   trend <- emtrends(bird_mod, "restauration", var = "year_num")
+trend_df <- as.data.frame(trend)
+trend_df$species <- i
+   L_trend[[i]] <- trend_df
+   
+  #DHARMa residuals 
+  simulationOutput <- simulateResiduals(fittedModel = bird_mod, plot = F)
+  
+  p3<-ggplot(trend_df, aes(x =  year_num.trend, y = species, color = restauration)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+    theme_classic() +
+  labs(x = "Temporal Trend", y = "Species", color = "Restauration")
+  
+ 
+  # plot 2: check model validity
+  p2 <- ggplotify::as.ggplot(function() {
+    plot(simulationOutput)
+    })
+  
+   print(p2 + ggtitle(i))
+   print(p3 + ggtitle(i))
+   grid.newpage()
+   grid.draw(tableGrob(stats))
+}
+
+df_all_trends <- do.call(rbind,L_trend)
+
+ggplot(df_all_trends,aes(x=year_num.trend, y = species))+
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour="gray60") +
+  theme_classic() +
+  labs(x = "Temporal Trend", y = "Species")+
+  facet_wrap(~restauration)
+
+
+dev.off()
+```
+
+```{r}
+#TEST Poisson####
+library(ggplotify)
+library(patchwork)
+library(gridExtra)
+library(grid)
+
+list <- unique(birds_filtered$species)
+
+pdf("glmm_final_nbinom_species_finalpoisson.pdf")
+L_trend <- list()
+for(i in list){
+  
+  #create dataset
+  bird <- birds_filtered %>% 
+  filter(species == i)
+  bird$year_num <- as.numeric(as.character(bird$year))
+  
+  #filter out if sum abundance(restauration = 0)
+  
+  sum_passive <- bird %>%
+    filter(restauration == "Passive")
+  sum_passive <- sum(sum_passive$abundance, na.rm = TRUE)
+  
+  sum_active <- bird %>%
+    filter(restauration == "Active")
+  sum_active <- sum(sum_active$abundance, na.rm = TRUE)
+  
+  sum_control <- bird %>%
+    filter(restauration == "Control")
+  sum_control <- sum(sum_control$abundance, na.rm = TRUE)
+  
+ 
+   if(sum_passive == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Passive") #| = or
+  }
+  
+  if(sum_active == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Active") #| = or
+  } 
+  
+  if(sum_control == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Control") #| = or
+  }
+  
+  bird_abundance_check <- bird %>%
+  filter(abundance != 0) %>%
+  group_by(restauration, year) %>%
+  group_by(restauration) %>%
+  summarise(n_years = n_distinct(year), .groups = "drop")
+  
+  for(idx in seq_along(bird_abundance_check$n_years)){
+    
+    if(bird_abundance_check$n_years[idx] < 2){
+      
+      rest_rm <- bird_abundance_check$restauration[idx]
+      
+      bird <- bird %>%
+        filter_out(restauration == rest_rm)
+    }}
+
+  
+  #GLMM equation
+   bird_mod <- tryCatch({ 
+    glmmTMB(
+      abundance ~ log(surface_water + 1) + year_num*restauration +
+        cloudiness + wind + (1 | site/Subsite),
+      family = poisson(),
+      data = bird
+    )
+  }, error = function(e) {
+    message(paste("Model failed for:", i))
+    return(NULL)
+  })
+   
+   if(is.null(bird_mod)){
+     next
+   }
+   
+   hexian_warning <- as.numeric(logLik(bird_mod))
+   
+   if(is.na(hexian_warning)){
+     next
+   }
+   
+   #Stats
+   stats <- tryCatch({
+  car::Anova(bird_mod)
+}, error = function(e) {
+  message(paste("Anova failed for:", i))
+  return(NULL)
+})
+   
+    if(is.null(stats)){
+     next
+   }
+
+   bird_mod
+   
+   trend <- emtrends(bird_mod, "restauration", var = "year_num")
+trend_df <- as.data.frame(trend)
+trend_df$species <- i
+   L_trend[[i]] <- trend_df
+   
+  #DHARMa residuals 
+  simulationOutput <- simulateResiduals(fittedModel = bird_mod, plot = F)
+  
+  p3<-ggplot(trend_df, aes(x =  year_num.trend, y = species, color = restauration)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+    theme_classic() +
+  labs(x = "Temporal Trend", y = "Species", color = "Restauration")
+  
+ 
+  # plot 2: check model validity
+  p2 <- ggplotify::as.ggplot(function() {
+    plot(simulationOutput)
+    })
+  
+   print(p2 + ggtitle(i))
+   print(p3 + ggtitle(i))
+   grid.newpage()
+   grid.draw(tableGrob(stats))
+}
+
+df_all_trends <- do.call(rbind,L_trend)
+
+ggplot(df_all_trends,aes(x=year_num.trend, y = species))+
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour="gray60") +
+  theme_classic() +
+  labs(x = "Temporal Trend", y = "Species")+
+  facet_wrap(~restauration)
+
+
+dev.off()
+```
+
+
+```{r}
+#TEST with predrix and mouette rieuse removed####
+library(ggplotify)
+library(patchwork)
+library(gridExtra)
+library(grid)
+
+birds_filtered$abundance <- birds_filtered$abundance %>% replace(is.na(.), 0)
+birds_filtered$cloudiness <- as.factor(birds_filtered$cloudiness)
+birds_filtered$wind <- as.factor(birds_filtered$wind)
+
+birds_filtered <- birds_filtered %>%
+  filter(!species %in% c("Perdrix.rouge", "Mouette.rieuse"))
+
+list <- unique(birds_filtered$species)
+
+pdf("glmm without julian day.pdf")
+L_trend <- list()
+for(i in list){
+  
+  #create dataset
+  bird <- birds_filtered %>% 
+  filter(species == i)
+  bird$year_num <- as.numeric(as.character(bird$year))
+  
+  #filter out if sum abundance(restauration = 0)
+  
+  sum_passive <- bird %>%
+    filter(restauration == "Passive")
+  sum_passive <- sum(sum_passive$abundance, na.rm = TRUE)
+  
+  sum_active <- bird %>%
+    filter(restauration == "Active")
+  sum_active <- sum(sum_active$abundance, na.rm = TRUE)
+  
+  sum_control <- bird %>%
+    filter(restauration == "Control")
+  sum_control <- sum(sum_control$abundance, na.rm = TRUE)
+  
+ 
+   if(sum_passive == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Passive") #| = or
+  }
+  
+  if(sum_active == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Active") #| = or
+  } 
+  
+  if(sum_control == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Control") #| = or
+  }
+  
+  bird_abundance_check <- bird %>%
+    filter(abundance != 0) %>%
+    group_by(restauration) %>%
+    summarise(n_years = n_distinct(year), .groups = "drop")
+  
+  for(idx in seq_along(bird_abundance_check$n_years)){
+    
+    if(bird_abundance_check$n_years[idx] < 2){
+      
+      rest_rm <- bird_abundance_check$restauration[idx]
+      
+      bird <- bird %>%
+        filter_out(restauration == rest_rm)
+    }}
+
+  
+  #GLMM equation
+   bird_mod <- tryCatch({ 
+    glmmTMB(
+      abundance ~ log(surface_water + 1) + year_num*restauration +
+        cloudiness + wind + (1 | site/Subsite),
+      family = nbinom2(),
+      data = bird
+    )
+  }, error = function(e) {
+    message(paste("Model failed for:", i))
+    return(NULL)
+  })
+   
+   if(is.null(bird_mod)){
+     next
+   }
+   
+   hexian_warning <- as.numeric(logLik(bird_mod))
+   
+   if(is.na(hexian_warning)){
+     next
+   }
+   
+   #Stats
+   stats <- tryCatch({
+  car::Anova(bird_mod)
+}, error = function(e) {
+  message(paste("Anova failed for:", i))
+  return(NULL)
+})
+   
+    if(is.null(stats)){
+     next
+   }
+
+
+   trend <- emtrends(bird_mod, "restauration", var = "year_num")
+trend_df <- as.data.frame(trend)
+trend_df$species <- i
+   L_trend[[i]] <- trend_df
+   
+  #DHARMa residuals 
+  simulationOutput <- simulateResiduals(fittedModel = bird_mod, plot = F)
+  
+  p3<-ggplot(trend_df, aes(x =  year_num.trend, y = species, color = restauration)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+    theme_classic() +
+  labs(x = "Temporal Trend", y = "Species", color = "Restauration")
+  
+ 
+  # plot 2: check model validity
+  p2 <- ggplotify::as.ggplot(function() {
+    plot(simulationOutput)
+    })
+  
+   print(p2 + ggtitle(i))
+   print(p3 + ggtitle(i))
+   grid.newpage()
+   grid.draw(tableGrob(stats))
+}
+
+df_all_trends <- do.call(rbind,L_trend)
+
+ggplot(df_all_trends,aes(x=year_num.trend, y = species))+
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour="gray60") +
+  theme_classic() +
+  labs(x = "Temporal Trend", y = "Species")+
+  facet_wrap(~factor(restauration,levels=c()))
+
+
+dev.off()
+```
+
+
+```{r}
+#FOR LOOP FOR EVERY SPECIES####
+library(ggplotify)
+library(patchwork)
+library(gridExtra)
+library(grid)
+
+birds_filtered$abundance <- birds_filtered$abundance %>% replace(is.na(.), 0)
+birds_filtered$cloudiness <- as.factor(birds_filtered$cloudiness)
+birds_filtered$wind <- as.factor(birds_filtered$wind)
+
+#create a list of all the species in the dataset
+list <- unique(birds_filtered$species)
+
+#create pdf file to store results
+pdf("glmm species english vegetation_cover.pdf")
+
+#empty lists
+L_trend <- list()
+L_emmeans <- list()
+failed_species <- c()
+
+for(i in list){
+  
+  #create dataset
+  bird <- birds_filtered %>% 
+  filter(species == i)
+  bird$year_num <- as.numeric(as.character(bird$year))
+  
+  #filter out if sum abundance(restauration = 0)
+  
+  sum_passive <- bird %>%
+    filter(restauration == "Passive")
+  sum_passive <- sum(sum_passive$abundance, na.rm = TRUE)
+  
+  sum_active <- bird %>%
+    filter(restauration == "Active")
+  sum_active <- sum(sum_active$abundance, na.rm = TRUE)
+  
+  sum_control <- bird %>%
+    filter(restauration == "Control")
+  sum_control <- sum(sum_control$abundance, na.rm = TRUE)
+  
+ 
+   if(sum_passive == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Passive") #| = or
+  }
+  
+  if(sum_active == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Active") #| = or
+  } 
+  
+  if(sum_control == 0){
+    bird <- bird %>%
+      filter_out(restauration == "Control") #| = or
+  }
+  
+  bird_abundance_check <- bird %>%
+    filter(abundance != 0) %>%
+    group_by(restauration) %>%
+    summarise(n_years = n_distinct(year), .groups = "drop")
+  
+  for(idx in seq_along(bird_abundance_check$n_years)){
+    
+    if(bird_abundance_check$n_years[idx] < 2){
+      
+      rest_rm <- bird_abundance_check$restauration[idx]
+      
+      bird <- bird %>%
+        filter_out(restauration == rest_rm)
+    }}
+
+  
+  #GLMM equation
+#---------------------------
+# TRY FULL MODEL
+#---------------------------
+bird_mod <- tryCatch({ 
+  glmmTMB(
+    abundance ~ scale(log(surface_water + 1)) + scale(year_num)*restauration +
+      cloudiness + wind + scale(julian_day)+ scale(initial_cover)+(1 | site/Subsite),
+    family = nbinom2(),
+    data = bird
+  )
+}, error = function(e) NULL)
+
+model_type <- "full"
+
+# check validity
+if(!is.null(bird_mod)){
+  if(is.na(as.numeric(logLik(bird_mod)))){
+    bird_mod <- NULL
+  }
+}
+
+#---------------------------
+# TRY PAIRWISE IF FAILED
+#---------------------------
+if(is.null(bird_mod)){
+  
+  rest_levels <- unique(bird$restauration)
+  
+  rest_combos <- list(
+    c("Active", "Control"),
+    c("Active", "Passive"),
+    c("Passive", "Control")
+  )
+  
+  for(combo in rest_combos){
+    
+    if(all(combo %in% rest_levels)){
+      
+      bird_sub <- bird %>%
+        filter(restauration %in% combo)
+      
+      temp_mod <- tryCatch({
+        glmmTMB(
+          abundance ~ scale(log(surface_water + 1)) + scale(year_num)*restauration +
+            cloudiness + wind + scale(julian_day)+ (1 | site/Subsite),
+          family = nbinom2(),
+          data = bird_sub
+        )
+      }, error = function(e) NULL)
+      
+      if(!is.null(temp_mod)){
+        if(!is.na(as.numeric(logLik(temp_mod)))){
+          
+          bird_mod <- temp_mod
+          bird <- bird_sub
+          model_type <- paste0("pairwise_", paste(combo, collapse = "_"))
+          
+          break
+        }
+      }
+    }
+  }
+}
+
+#---------------------------
+# FINAL FAILURE
+#---------------------------
+if(is.null(bird_mod)){
+  message("All models failed for: ", i)
+  failed_species <- c(failed_species, i)
+  next
+}
+   #Stats
+   stats <- tryCatch({
+  car::Anova(bird_mod)
+}, error = function(e) {
+  message(paste("Anova failed for:", i))
+  return(NULL)
+})
+   
+  if(is.null(stats)){
+  failed_species <- c(failed_species, i)
+  next
+  }
+   
+#---------------------------
+# EMMEANS (year × restauration)
+#---------------------------
+emm <- tryCatch({
+  
+  emmeans(bird_mod, ~ year_num * restauration,
+        at = list(year_num = sort(unique(bird$year_num))))
+  
+}, error = function(e) {
+  
+  # fallback if interaction not possible
+  emmeans(bird_mod, ~ year_num)
+})
+
+if(!is.null(emm)){
+  
+  emm_df <- as.data.frame(emm)
+  emm_df$species <- i
+  
+  # ensure restauration column exists
+  if(!"restauration" %in% names(emm_df)){
+    emm_df$restauration <- "overall"
+  }
+  
+  L_emmeans[[i]] <- emm_df
+}
+   
+#------------------
+#MODEL TRENDS
+#------------------
+   trend <- emtrends(bird_mod, "restauration", var = "year_num")
+trend_df <- as.data.frame(trend)
+trend_df$species <- i
+   L_trend[[i]] <- trend_df
+   
+  #DHARMa residuals 
+  simulationOutput <- simulateResiduals(fittedModel = bird_mod, plot = F)
+  
+  p3<-ggplot(trend_df, aes(x =  year_num.trend, y = species, color = restauration)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+    theme_classic() +
+  labs(x = "Temporal Trend", y = "Species", color = "Restauration")
+  
+ 
+  # plot 2: check model validity
+  p2 <- ggplotify::as.ggplot(function() {
+    plot(simulationOutput)
+    })
+  
+   print(p2 + ggtitle(i))
+   print(p3 + ggtitle(i))
+   grid.newpage()
+   grid.draw(tableGrob(stats))
+}
+successful_species <- unique(unlist(lapply(L_trend, function(x) x$species)))
+
+df_all_trends <- do.call(rbind,L_trend)
+df_emmeans <- dplyr::bind_rows(L_emmeans)
+
+df_all_trends_filtered <- df_all_trends %>%
+  mutate(ci_width = asymp.UCL - asymp.LCL) %>%
+  group_by(species, restauration) %>%
+  filter(all(ci_width <= 2)) %>%
+  ungroup()
+
+ggplot(df_all_trends_filtered, aes(x = year_num.trend, y = species)) +
+  geom_point(position = position_dodge(width = 0.5)) +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 position = position_dodge(width = 0.5), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "gray60") +
+  theme_classic() +
+  labs(x = "Temporal Trend", y = "Species") +
+  facet_wrap(~factor(restauration, levels = c("Control","Passive","Active"))) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+
+
+dev.off()
+
+failed_species <- unique(failed_species)
+
+birds_failed <- birds_filtered %>%
+  filter(species %in% failed_species)
+
+df_failed_species <- data.frame(species = failed_species)
+```
+
+```{r}
+#EXTRACTING ABUNDANCE CHANGE####
+abundance_change <- birds_filtered %>%
+  filter(species %in% successful_species) %>%
+  group_by(species, year) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE), .groups = "drop") %>%
+  group_by(species) %>%
+  summarise(
+    initial_year = min(year),
+    final_year = max(year),
+    
+    initial_abundance = total_abundance[year == min(year)][1],
+    final_abundance   = total_abundance[year == max(year)][1],
+    
+    absolute_change = final_abundance - initial_abundance,
+    .groups = "drop"
+  )
+
+abundance_change
+
+write.csv(abundance_change,
+          "abundance_change_success_species.csv",
+          row.names = FALSE)
+```
+
+
+
+```{r}
+#ALL FAILED SPECIES####
+pdf("All failed species.pdf")
+
+L_trend_failed <- list()
+
+list_failed <- unique(birds_failed$species)
+
+for(i in list_failed){
+  
+  bird <- birds_failed %>% filter(species == i)
+  bird$year_num <- as.numeric(as.character(bird$year))
+
+  #---------------------------
+  # MODEL
+  #---------------------------
+  bird_mod_f <- tryCatch({
+    glmmTMB(
+      abundance ~ scale(log(surface_water + 1)) + scale(year_num) +
+        cloudiness + wind + scale(julian_day) +
+        (1 | site/Subsite),
+      family = nbinom2(),
+      data = bird
+    )
+  }, error = function(e){
+    message("Fallback model failed for: ", i)
+    return(NULL)
+  })
+  
+  if(is.null(bird_mod_f)) next
+  if(is.na(as.numeric(logLik(bird_mod_f)))) next
+  
+  #---------------------------
+  # STATS
+  #---------------------------
+  stats <- tryCatch({
+    car::Anova(bird_mod_f)
+  }, error = function(e) NULL)
+  
+  #---------------------------
+  # TREND
+  #---------------------------
+  trend <- tryCatch({
+    emtrends(bird_mod_f, ~1, var = "year_num")
+  }, error = function(e) NULL)
+  
+  if(is.null(trend)) next
+  
+  trend_df <- as.data.frame(trend)
+  trend_df$species <- i
+  trend_df$restauration <- "overall"
+  
+  L_trend_failed[[i]] <- trend_df
+  
+  #---------------------------
+  # DHARMa
+  #---------------------------
+  simulationOutput <- simulateResiduals(fittedModel = bird_mod_f, plot = FALSE)
+  
+  #---------------------------
+  # PLOTS (MATCH MAIN LOOP)
+  #---------------------------
+  
+  # trend plot
+  p3 <- ggplot(trend_df,
+               aes(x = year_num.trend, y = species)) +
+    geom_point(color = "black") +
+    geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                   height = 0.2, color = "black") +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    theme_classic() +
+    labs(x = "Temporal Trend", y = "Species")
+  
+  # DHARMa plot
+  p2 <- ggplotify::as.ggplot(function() {
+    plot(simulationOutput)
+  })
+  
+  # print BOTH like main loop
+  print(p2 + ggtitle(paste(i, "- fallback model")))
+  print(p3 + ggtitle(i))
+  
+  grid.newpage()
+  
+  if(!is.null(stats)){
+    grid.draw(tableGrob(stats))
+  }
+}
+
+df_trend_failed <- dplyr::bind_rows(L_trend_failed)
+
+#---------------------------
+# FINAL SUMMARY PLOT
+#---------------------------
+ggplot(df_trend_failed, aes(x = year_num.trend, y = species)) +
+  geom_point(color = "black") +
+  geom_errorbarh(aes(xmin = asymp.LCL, xmax = asymp.UCL),
+                 height = 0.2, color = "black") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour="gray60") +
+  theme_classic() +
+  labs(
+    x = "Temporal Trend",
+    y = "Species",
+    title = "Temporal trends (fallback model - no restauration)"
+  )
+
+dev.off()
+```
+```{r}
+spec_that_pass <- birds_filtered %>%
+  filter(species %in% successful_species)
+
+length(unique(spec_that_pass$species))
+
+df1 <- aggregate(abundance ~ species + restauration,
+                 FUN = mean,
+                 data = spec_that_pass)
+
+df2 <- aggregate(abundance ~ species,
+                 FUN = sum,
+                 data = df1)
+
+colnames(df2)[2] <- "total abundance"
+colnames(df2)
+
+delta_abundance <- merge(df1, df2, by = "species")
+
+delta_abundance$relative_abundance <-
+  (delta_abundance$abundance / delta_abundance$`total abundance`) * 100
+
+delta_abundance
+
+```
+```{r}
+#wide format test
+library(tidyr)
+library(dplyr)
+
+# Pivot df1 to wide
+df_wide <- df1 %>%
+  pivot_wider(
+    names_from = restauration,
+    values_from = abundance,
+    values_fill = 0
+  )
+
+# Join total abundance
+final_df <- df_wide %>%
+  left_join(df2, by = "species")
+
+final_df
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Start from your long table with relative abundance
+df_combined <- delta_abundance %>%
+  mutate(
+    formatted = paste0(
+      round(abundance, 4),
+      " (",
+      round(relative_abundance, 1),
+      "%)"
+    )
+  )
+
+# Pivot to wide using the formatted column
+final_df <- df_combined %>%
+  select(species, restauration, formatted) %>%
+  pivot_wider(
+    names_from = restauration,
+    values_from = formatted,
+    values_fill = "0 (0%)"
+  ) %>%
+  left_join(df2, by = "species")
+
+final_df
+
+write.csv(final_df, "abundance_table_elie.csv")
+```
+
+```{r}
+birds_filtered %>%
+  filter(species == "Spectacled Warbler",
+         restauration == "Active") %>%
+  group_by(year) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE))
+```
+
+
+

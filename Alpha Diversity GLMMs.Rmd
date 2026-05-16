@@ -1,0 +1,1762 @@
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(vegan)
+library(glmmTMB)
+library(DHARMa)
+library(effects)
+library(emmeans)
+library(openxlsx)
+library(car)
+```
+
+
+```{r}
+#Import the bird data set using the read.csv command####
+#birds_2014 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/test.csv")
+birds_2015 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2015-ASSEMBLE.csv")
+birds_2016 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2016_assemble.csv")
+birds_2017 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2017_assemble.csv")
+birds_2018 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2018_assemble.csv")
+birds_2019 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2019-ASSEMBLE.csv")
+birds_2021 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2021.csv")
+birds_2024 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2024-ASSEMBLE.csv")
+
+#Remove all extra columns void of information####
+#Compares left of %in% to the right, if matching, because of "!", the code returns it as FALSE and removes it from the dataframe.
+birds_2015 <- birds_2015[, !(names(birds_2015) %in% paste0("X.", 15))]
+birds_2016 <- birds_2016[, !(names(birds_2016) %in% paste0("X.", 15))]
+birds_2017 <- birds_2017[, !(names(birds_2017) %in% paste0("X.", 15))]
+birds_2018 <- birds_2018[, !(names(birds_2018) %in% paste0("X.", 15))]
+birds_2019 <- birds_2019[, !(names(birds_2019) %in% paste0("X.", 15))]
+birds_2021 <- birds_2021[, !(names(birds_2021) %in% paste0("X.", 15))]
+birds_2024 <- birds_2024[, !(names(birds_2024) %in% paste0("X.", 15))]
+
+#REMOVING TRANSIT DATA####
+#Create a function, create a loop, apply that function and save each year in a list
+remove_obs <- function(df, column) {
+  df[!df[[column]] %in% c("TOTAL", "Vol", "en chemin", ">200m","Vol (<200m)", ""),] #"Vol (<200m)" and "" or smth
+} #df is the dataframe, column is the columns the name of the column to filter by. Matches on both sides of the %in% and removes it due to the "!".
+
+#Create a list of all your yearly datasets, "data" is the name of the dataset, "col" is the desired column you would like to filter
+birds_list <- list(
+  #birds_2014 = list(data = birds_2014, col = "X.14"),
+  birds_2015 = list(data = birds_2015, col = "X.14"),
+  birds_2016 = list(data = birds_2016, col = "X.14"),
+  birds_2017 = list(data = birds_2017, col = "X.14"),
+  birds_2018 = list(data = birds_2018, col = "X.14"),
+  birds_2019 = list(data = birds_2019, col = "X.14"),
+  birds_2021 = list(data = birds_2021, col = "X.14"),
+  birds_2024 = list(data = birds_2024, col = "X.14")
+)
+
+for(i in names(birds_list)){
+  birds_list[[i]]$data <- remove_obs(birds_list[[i]]$data, birds_list[[i]]$col)
+}
+
+#names(birds_list) → gives the names of each list element: "birds_2014", "birds_2015", etc.
+  #for(i in names(birds_list)) → loops over each dataset.
+    #birds_list[[i]]$data → selects the dataframe for the current year.
+      #birds_list[[i]]$col → selects the column name to filter by.
+        #remove_obs(...) → applies the filtering function.
+          #<- → replaces the old dataframe with the cleaned version.
+
+new_colnames <- c(
+  "Subsite","Site","Type (Restauration active / passive / control)","julian_day",
+  "Date","Heure debut","1er ou 2e passage",
+  "cloudiness", "rain", "wind", "visibility", "surface_water",
+  "Observer Name","Department","Distance"
+)
+
+birds_list <- lapply(birds_list, function(x) {
+  names(x$data)[1:length(new_colnames)] <- new_colnames
+  return(x)
+})
+
+head(birds_list$birds_2015$data)
+```
+
+```{r}
+#Removing repeated header rows#### 
+
+#1. Extract the cleaned dataframes from the list
+cleaned_dfs <- lapply(birds_list, function(x) x$data)
+
+cleaned_dfs <- lapply(cleaned_dfs, function(df) {
+  df[-1, ]  # remove the first row
+})
+
+#2. Identify all columns across all years
+all_cols <- unique(unlist(lapply(cleaned_dfs, names)))
+
+#3. Ensure all dataframes have the same columns
+# If a column doesn’t exist in a year, fill with NA
+standardize_cols <- function(df, all_cols) {
+  missing_cols <- setdiff(all_cols, names(df))
+  if(length(missing_cols) > 0){
+    df[missing_cols] <- NA  # add missing columns
+  }
+  df <- df[all_cols]        # reorder columns consistently
+  return(df)
+}
+cleaned_dfs <- lapply(cleaned_dfs, standardize_cols, all_cols = all_cols)
+
+#4. Combine all years into a single dataset
+birds_all_years <- do.call(rbind, cleaned_dfs)
+
+birds_all_years$Subsite <- gsub("Platelet\\s+","Platelet", birds_all_years$Subsite)
+
+
+head(birds_all_years)
+```
+
+```{r}
+#Converting numeric weather variables####
+
+# Convert surface_water values to numeric
+birds_all_years$surface_water <- as.numeric(gsub("%", "", birds_all_years$surface_water)) / 100
+
+# Convert other weather columns to numeric
+climate_cols <- c("cloudiness", "rain", "wind", "visibility")
+birds_all_years[, climate_cols] <- lapply(birds_all_years[, climate_cols], function(x) as.numeric(as.character(x)))
+```
+
+```{r}
+#CREATING DATASET FOR SURFACE_WATER TREND ANALYSIS####
+
+# Ensure numeric and factor columns
+birds_all_years <- birds_all_years %>%
+  mutate(
+    Date = as.Date(Date, format="%m/%d/%Y"),
+    Site = as.factor(Site),
+    `1er ou 2e passage` = as.factor(`1er ou 2e passage`)
+  )
+birds_all_years <- birds_all_years %>%
+  mutate(
+    year = format(Date, "%Y"),
+    .after = Date
+  ) %>%
+  relocate(site = Site, passage = `1er ou 2e passage`, .after = year)
+
+birds_all_years <- birds_all_years %>%
+  filter(!is.na(year) & !is.na(Subsite))
+
+```
+
+```{r}
+library(tidyr)
+#Extracting Species Data into long format####
+
+# Metadata columns
+meta_names <- 1:16
+
+# Species columns
+species_cols <- (17:ncol(birds_all_years))
+
+birds_long <- birds_all_years %>%
+  pivot_longer(
+    cols = all_of(species_cols),
+    names_to = "species",
+    values_to = "abundance"
+  )
+birds_long <- birds_long %>%
+  mutate(
+    abundance = trimws(abundance),              # remove spaces
+    abundance = ifelse(abundance == "", NA, abundance),
+    abundance = as.numeric(abundance)           # convert to numeric
+  )
+
+species_tobe_removed <- birds_long %>%
+  group_by(species) %>%
+  summarise(total_abundance = sum(abundance, na.rm = TRUE)) %>%
+  filter(total_abundance == 0) %>%
+  pull(species)
+
+birds_long <- birds_long %>%
+  filter(!species %in% species_tobe_removed)  
+
+```
+
+```{r}
+#REMOVING NON-BREEDING SPECIES####
+species_info <- read_excel("C:/Users/Lenovo/Documents/BTR/Bird_Data/Espece nicheur-revMT.xlsx")
+
+species_info <- species_info %>%
+  rename(
+    species = Noms.Especes,
+    migrant = `Migrant/Vagrant`
+  )
+
+birds_filtered <- birds_long %>%
+  left_join(species_info, by = "species")
+
+birds_filtered <- birds_filtered %>%
+  filter(!grepl("^1", migrant) | is.na(migrant))
+
+birds_filtered <- birds_filtered %>%
+  mutate(line_id = paste(Subsite, Date, passage, sep = "_"))
+
+line_abundance <- birds_filtered %>%
+  group_by(line_id) %>%
+  summarise(
+    abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+line_metadata <- birds_filtered %>%
+  select(line_id, Subsite, `Type (Restauration active / passive / control)`, julian_day, Date, year, site, passage,
+         `Heure debut`, cloudiness, rain, wind, visibility, surface_water, `Observer Name`, Department) %>%
+  distinct(line_id, .keep_all = TRUE)
+
+glmm_df <- line_metadata %>%
+  left_join(line_abundance, by = "line_id")
+
+glmm_df <- glmm_df %>%
+  filter(!(line_id == "Briscon10_2024_1" & surface_water == 0.01),
+         !(line_id == "PourtourRascaillan10_2019_2" & surface_water == 1),
+         !(line_id == "PourtourRascaillan4_2017_1" & wind == 1))
+
+#CREATING GLMM####
+glmm_df
+```
+
+```{r}
+length(unique(birds_filtered$species))
+
+subset(birds_filtered,birds_filtered$species=="Grand.duc.d.Europe"&birds_filtered$abundance>1)
+sort(tapply(birds_filtered$abundance,birds_filtered$species,sum,na.rm=T))
+
+birds_filtered[birds_filtered$Subsite=="Briscon4"&birds_filtered$year=="2018" , ]
+```
+
+```{r}
+#There are four more rows in the other dataset, but Pourtrague has 4 extra (incorrect) observations for 2018! Which means 1599 is the correct number of lines!!!!!
+species_by_line <- birds_filtered %>%
+  group_by(line_id, species) %>%
+  summarise(
+    abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+community_matrix <- species_by_line %>%
+  pivot_wider(
+    names_from = species,
+    values_from = abundance,
+    values_fill = 0
+  )
+
+metadata <- birds_filtered %>%
+  select(
+    line_id,
+    Subsite,
+    `Type (Restauration active / passive / control)`,
+    julian_day,
+    Date,
+    year,
+    site,
+    passage,
+    `Heure debut`,
+    cloudiness,
+    rain,
+    wind,
+    visibility,
+    surface_water,
+    `Observer Name`,
+    Department
+  ) %>%
+  distinct(line_id, .keep_all = TRUE)
+
+community_matrix_subsite <- metadata %>%
+  left_join(community_matrix, by = "line_id")
+
+
+community_matrix_subsite
+```
+```{r}
+length(unique(birds_filtered$species))
+```
+
+
+```{r}
+species_mat <- as.matrix(community_matrix_subsite[, -(1:16)])
+
+alpha_df <- data.frame(
+  richness = specnumber(species_mat),
+  shannon  = diversity(species_mat, "shannon")
+)
+
+alpha_df$evenness <- ifelse(
+  alpha_df$richness > 1,
+  alpha_df$shannon / log(alpha_df$richness),
+  NA
+)
+
+community_matrix_subsite <- bind_cols(
+  community_matrix_subsite,
+  alpha_df
+)
+
+
+glmm_df <- glmm_df %>%
+  left_join(
+    community_matrix_subsite %>%
+      select(line_id, richness, shannon, evenness),
+    by = "line_id"
+  )
+
+```
+```{r}
+library(stringr)
+
+glmm_df <- glmm_df %>%
+  mutate(
+    Subsite = str_trim(Subsite),                 # remove leading/trailing spaces
+    Subsite = str_replace_all(Subsite, "\\s+", ""),  # remove ALL spaces
+  Subsite = str_replace(Subsite, "^Enfores", "Enfor"),  # enfores → enfor
+    Subsite = str_replace(Subsite, "^Enfor(?=\\d)", "Enfor") # keep format clean
+    )
+```
+
+```{r}
+coordinates <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data/Coordonnees Points STOC-EPS3_Lambert2étendu.csv")
+names(coordinates)[c(1, 2, 3)] <- c("Subsite", "x_coord", "y_coord")
+
+#Converting to latitude and longitude values####
+library(sf)
+coords_sf <- st_as_sf(
+  coordinates,
+  coords = c("x_coord", "y_coord"),
+  crs = 32631   # UTM WGS84 zone 31N
+)
+
+coords_latlon <- st_transform(coords_sf, crs = 4326)
+
+coords_latlon <- coords_latlon %>%
+  mutate(
+    lon = st_coordinates(.)[,1],
+    lat = st_coordinates(.)[,2]
+  )
+
+glmm_df <- merge(
+  glmm_df,
+  coords_latlon[, c("Subsite",
+                  "lon",
+                  "lat",
+                  "X..Lambert.II.étendu.",
+                  "Y..Lambert.II.étendu.")],
+  by = "Subsite",
+  all.x = TRUE
+)
+
+birds_2024 <- birds_2024[-1, ]
+names(birds_2024)[1] <- "Subsite"
+names(birds_2024)[3] <- "Type de Restauration"
+
+
+birds_2024 <- birds_2024 %>%
+  mutate(
+    `Type de Restauration` = case_when(
+      `Type de Restauration` %in% c("Témoin (Bélugue, DPM)") ~ "Control",
+      `Type de Restauration` == "Anciens salins - passif" ~ "Passive",
+      `Type de Restauration` == "Anciens salins - actif" ~ "Active",
+      `Type de Restauration` == "anciens salins - actif" ~ "Active",
+      TRUE ~ `Type de Restauration`  # keep everything else unchanged
+    )
+  )
+control <- birds_2024%>%
+  select(Subsite, `Type de Restauration`)
+
+control_unique <- control %>%
+  select(Subsite, `Type de Restauration`) %>%
+  distinct()
+
+glmm_df  <- left_join(glmm_df, control_unique, by = "Subsite")
+
+glmm_df <- glmm_df %>%
+  rename(restauration=`Type de Restauration` )
+
+glmm_df <- glmm_df %>%
+  mutate(
+    across(c(cloudiness, wind, rain, visibility),
+           ~ ifelse(. == 0, 1, .))
+  )
+
+glmm_df$cloudiness <- as.factor(as.character(glmm_df$cloudiness))
+glmm_df$wind <- as.factor(as.character(glmm_df$wind))
+```
+
+```{r}
+#Vegetation cover!!!#####
+vegetation_cover <- read.csv("C:/Users/Lenovo/Documents/BTR/Statistics/vegetation_cover_corr.csv")
+names(vegetation_cover)[2] <- "initial_cover"
+names(vegetation_cover)[3] <- "final_cover"
+names(vegetation_cover)[4] <- "vegetation_change"
+setdiff(glmm_df$Subsite, vegetation_cover$Subsite)
+setdiff(vegetation_cover$subsite, glmm_df$subsite)
+length(intersect(glmm_df$subsite, vegetation_cover$subsite))
+
+vegetation_cover$initial_cover <- as.numeric(gsub("%", "", vegetation_cover$initial_cover))
+vegetation_cover$final_cover <- as.numeric(gsub("%", "", vegetation_cover$final_cover))
+vegetation_cover$vegetation_change <- as.numeric(gsub("%", "", vegetation_cover$vegetation_change))
+
+library(dplyr)
+
+glmm_df <- glmm_df %>%
+  left_join(vegetation_cover, by = "Subsite")
+
+change_cover_test <- lm(vegetation_change ~ restauration, data = glmm_df)
+
+summary(change_cover_test)
+emmeans(change_cover_test, pairwise ~ restauration)
+
+emmeans(change_cover_test, pairwise ~ restauration)
+
+plot(allEffects(change_cover_test), type="response")
+
+
+glmm_df$success <- glmm_df$initial_cover
+glmm_df$failure <- 100 - glmm_df$initial_cover
+
+model <- glm(
+  cbind(success, failure) ~ restauration,
+  data = glmm_df,
+  family = binomial
+)
+plot(allEffects(model), type="response")
+
+summary(model)
+```
+```{r}
+emmeans(model, ~ restauration, type = "response")
+```
+
+
+```{r}
+library(ggeffects)
+eff_lm <- ggpredict(change_cover_test, terms = "restauration")
+
+ggplot(eff_lm, aes(x = x, y = predicted, group = 1)) +
+  geom_point(size = 3) +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+  labs(
+    x = "Restoration type",
+    y = "Vegetation change (%)"
+  ) +
+  theme_minimal(base_size = 14)
+
+eff_glm <- ggpredict(model, terms = "restauration")
+
+ggplot(eff_glm, aes(x = x, y = predicted * 100, group = 1)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = conf.low * 100, ymax = conf.high * 100), width = 0.1) +
+  labs(
+    x = "Restoration type",
+    y = "Initial vegetation cover (%)"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+
+
+```{r}
+glmm_df$lon_red <- round(glmm_df$lon,4)
+glmm_df$lat_red <- round(glmm_df$lat,4)
+glmm_df$pos <- numFactor(glmm_df$lon_red, glmm_df$lat_red) #create numerical factor to create geographic position
+glmm_df$group <- factor(rep(1, nrow(glmm_df))) #chercher la justification sur la page glmm_TMB spatial correlation
+
+glmm_df$julian_day <- as.numeric(as.character(glmm_df$julian_day))
+
+
+#GLMM Richness####
+glmm_df$year_num <- as.numeric(as.character(glmm_df$year))
+
+glmm_df <- glmm_df %>%
+  filter(
+    !is.na(richness),
+    !is.na(lat),
+    !is.na(lon)
+  )
+#var(glmm_df$richness)
+#mean(glmm_df$richness)
+glmm_df$log_water <- log(glmm_df$surface_water+1)
+
+#as numeric
+mod_richness_num <- glmmTMB(
+  richness ~ scale(log(surface_water+1)) + scale(year_num)*restauration+cloudiness+wind+scale(julian_day)+ scale(initial_cover)*scale(vegetation_change)+(1|site/Subsite), #+ exp(pos + 0 | group),
+  family = poisson(),
+  data = glmm_df
+)
+#####################################################
+
+#as factor
+mod_richness_fac <- glmmTMB(
+  richness ~ scale(log(surface_water+1)) + year*restauration + cloudiness+wind+scale(julian_day)+scale(initial_cover)*scale(vegetation_change)+(1|site/Subsite), #+ exp(pos + 0 | group),
+  family = poisson(),
+  data = glmm_df
+)
+plot(allEffects(mod_richness_fac), type="response")
+summary(mod_richness_num)
+car::Anova(mod_richness_num)
+
+# numeric year model
+df_richness_num <- as.data.frame(allEffects(mod_richness_num)[[5]])
+df_richness_num$model <- "numeric"
+
+# factor year model
+df_richness_fac <- as.data.frame(allEffects(mod_richness_fac)[[5]])
+df_richness_fac$model <- "factor"
+df_richness_fac$year_num <- as.numeric(as.character(df_richness_fac$year))
+
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_richness_num,
+            aes(x = year_num, y = fit, colour = restauration),
+            size = 1) +
+
+  geom_ribbon(data = df_richness_num,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_richness_fac,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  geom_area() + scale_x_continuous(breaks=min(glmm_df$year):max(glmm_df$year))+
+  labs(x = "Year",
+       y = "Predicted Species Richness",
+       colour = "Restoration",
+       fill = "Restoration") +
+  theme_classic()
+
+simulationOutput <- simulateResiduals(fittedModel = mod_richness_num, plot = T)
+```
+
+```{r}
+#GLMM Abundance####
+
+#numeric
+mod_abundance_num <- glmmTMB(
+  abundance ~ scale(log(surface_water+1)) + scale(year_num) * restauration+ cloudiness+wind+scale(julian_day) +scale(initial_cover)*scale(vegetation_change) +(1|site/Subsite), #+ exp(pos + 0 | group),
+  family = nbinom2(), #the mean, therefore take nbinom2
+  data = glmm_df
+  )
+
+#factor
+mod_abundance_fac <- glmmTMB(
+  abundance ~ scale(log(surface_water+1)) + year * restauration+cloudiness+wind+ scale(julian_day)+scale(initial_cover)*scale(vegetation_change) +(1|site/Subsite), #+ exp(pos + 0 | group),
+  family = nbinom2(), #the mean, therefore take nbinom2
+  data = glmm_df
+  )
+
+# numeric year model
+df_abundance_num <- as.data.frame(allEffects(mod_abundance_num)[[5]])
+df_abundance_num$model <- "numeric"
+
+# factor year model
+df_abundance_fac <- as.data.frame(allEffects(mod_abundance_fac)[[5]])
+df_abundance_fac$model <- "factor"
+df_abundance_fac$year_num <- as.numeric(as.character(df_abundance_fac$year))
+
+#mean(glmm_df$abundance)
+
+hist(glmm_df$abundance)
+plot(allEffects(mod_abundance_fac), type="response")
+summary(mod_abundance_num)
+car::Anova(mod_abundance_num)
+
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_abundance_num,
+            aes(x = year_num, y = fit, colour = restauration),
+            size = 1) +
+
+  geom_ribbon(data = df_abundance_num,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_abundance_fac,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  geom_area() + scale_x_continuous(breaks=min(glmm_df$year):max(glmm_df$year))+
+  
+  labs(x = "Year",
+       y = "Predicted Total Abundance",
+       colour = "Restoration",
+       fill = "Restoration") +
+  theme_classic()
+
+simulationOutput <- simulateResiduals(fittedModel = mod_abundance_fac, plot = T)
+#testDispersion(simulationOutput)
+```
+
+```{r}
+#https://cran.r-project.org/web/packages/emmeans/vignettes/comparisons.html
+
+#GLMM Eveness####
+
+#as numeric
+glmm_df$evenness_cor <- glmm_df$evenness - 0.001
+mod_eveness_num <- glmmTMB(
+  evenness_cor ~ scale(log(surface_water+1)) + scale(year_num)*restauration+cloudiness+wind+scale(julian_day)+scale(initial_cover)*scale(vegetation_change) +(1|site/Subsite), # + exp(pos + 0 | group),
+  family = beta_family(),
+  data = glmm_df
+)
+
+#as factor
+glmm_df$evenness_cor <- glmm_df$evenness - 0.01
+mod_eveness_fac <- glmmTMB(
+  evenness_cor ~ scale(log(surface_water+1)) + year*restauration +cloudiness+wind+scale(julian_day)+scale(initial_cover)*scale(vegetation_change) +(1|site/Subsite), # + exp(pos + 0 | group),
+  family = beta_family(),
+  data = glmm_df
+)
+
+# numeric year model
+df_even_num <- as.data.frame(allEffects(mod_eveness_num)[[5]])
+df_even_num$model <- "numeric"
+
+# factor year model
+df_even_fac <- as.data.frame(allEffects(mod_eveness_fac)[[5]])
+df_even_fac$model <- "factor"
+df_even_fac$year_num <- as.numeric(as.character(df_even_fac$year))
+
+plot(allEffects(mod_eveness_fac), type="response")
+summary(mod_eveness_num)
+car::Anova(mod_eveness_num)
+
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_even_num,
+            aes(x = year_num, y = fit, colour = restauration),
+            size = 1) +
+
+  geom_ribbon(data = df_even_num,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_even_fac,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  geom_area() + scale_x_continuous(breaks=min(glmm_df$year):max(glmm_df$year))+
+  
+  labs(x = "Year",
+       y = "Predicted Eveness",
+       colour = "Restoration",
+       fill = "Restoration") +
+  theme_classic()
+
+simulationOutput <- simulateResiduals(fittedModel = mod_eveness_fac, plot = T)
+```
+
+
+#https://cran.r-project.org/web/packages/emmeans/vignettes/comparisons.html
+
+#GLMM Eveness####
+glmm_df$eveness_cor <- glmm_df$eveness - 0.01
+mod_eveness <- glmmTMB(
+  eveness_cor ~ log(surface_water*100+1) + year_num*restauration +site+(1|Subsite), #+ mat(pos + 0 | group)
+  family = beta_family(),
+  data = glmm_df
+)
+# numeric year model
+df_num <- as.data.frame(allEffects(mod_abundance_num)[[4]])
+df_num$model <- "numeric"
+
+# factor year model
+df_fac <- as.data.frame(allEffects(mod_abundance_fac)[[4]])
+df_fac$model <- "factor"
+df_fac$year_num <- as.numeric(as.character(df_fac$year))
+
+plot(allEffects(mod_eveness), type="response")
+summary(mod_eveness)
+car::Anova(mod_eveness)
+
+anova_eveness <- as.data.frame(car::Anova(mod_eveness))
+anova_eveness$variable <- "eveness"
+anova_eveness$Chisq <- round(anova_eveness$Chisq,3)
+
+emtrends(mod_eveness,~ restauration,var=  "year_num")
+
+df <- as.data.frame(allEffects(mod_eveness)[[4]])
+df$variable <- "eveness"
+  
+
+ggplot(df)+
+  # geom_point(aes(x=year_num, y=fit, col=restauration))+
+  geom_line(aes(x=year_num, y=fit, col=restauration))+
+  geom_ribbon(aes(x=year_num, ymin=lower, ymax=upper, fill=restauration),alpha=0.2)+
+labs(x = "Year", y = "Eveness", colour = "Restoration", fill = "Restoration")
+
+simulationOutput <- simulateResiduals(fittedModel = mod_eveness, plot = T)
+
+
+# year as factor
+glmm_df$eveness_cor <- glmm_df$eveness - 0.01
+mod_eveness_yrfac <- glmmTMB(
+  eveness_cor ~ log(surface_water*100+1) + year*restauration +site+(1|Subsite), #+ mat(pos + 0 | group)
+  family = beta_family(),
+  data = glmm_df
+)
+summary(glmm_df$eveness)
+
+plot(allEffects(mod_eveness_yrfac), type="response")
+summary(mod_eveness_yrfac)
+car::Anova(mod_eveness_yrfac)
+
+anova_eveness_yrfac <- as.data.frame(car::Anova(mod_eveness_yrfac))
+anova_eveness_yrfac$variable <- "eveness"
+anova_eveness_yrfac$Chisq <- round(anova_eveness$Chisq,3)
+
+(mod_eveness_yrfac,pairwise~year*restauration,type="response", adjust = "bonferroni")
+
+df_yrfac <- as.data.frame(allEffects(mod_eveness_yrfac)[[3]])
+df_yrfac$variable <- "eveness"
+  
+
+ggplot(df_yrfac)+
+  # geom_point(aes(x=year_num, y=fit, col=restauration))+
+  geom_line(aes(x=year, y=fit, col=restauration))+
+  geom_ribbon(aes(x=year, ymin=lower, ymax=upper, fill=restauration),alpha=0.2)+
+labs(x = "Year", y = "Eveness", colour = "Restoration", fill = "Restoration")
+
+```{r}
+#Shannon####
+#as numeric
+
+mod_shannon_num <- glmmTMB(
+  shannon ~ scale(log(surface_water+1))+ scale(year_num)*restauration+cloudiness+wind+ scale(julian_day) + scale(initial_cover)*scale(vegetation_change)  +(1|site/Subsite), # exp(pos + 0 | group),
+  family = gaussian(),
+  data = glmm_df
+)
+
+#as factor
+mod_shannon_fac <- glmmTMB(
+  shannon ~ scale(log(surface_water+1))+ year*restauration +cloudiness+wind+ scale(julian_day) +scale(initial_cover)*scale(vegetation_change) + (1|site/Subsite), #exp(pos + 0 | group),
+  family = gaussian(),
+  data = glmm_df
+)
+
+# numeric year model
+df_shannon_num <- as.data.frame(allEffects(mod_shannon_num)[[5]])
+df_shannon_num$model <- "numeric"
+
+# factor year model
+df_shannon_fac <- as.data.frame(allEffects(mod_shannon_fac)[[5]])
+df_shannon_fac$model <- "factor"
+df_shannon_fac$year_num <- as.numeric(as.character(df_shannon_fac$year))
+
+plot(allEffects(mod_shannon_fac), type="response")
+summary(mod_shannon_num)
+car::Anova(mod_shannon_num)
+
+
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_shannon_num,
+            aes(x = year_num, y = fit, colour = restauration),
+            size = 1) +
+
+  geom_ribbon(data = df_shannon_num,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_shannon_fac,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  geom_area() + scale_x_continuous(breaks=min(glmm_df$year):max(glmm_df$year))+
+  
+  labs(x = "Year",
+       y = "Predicted Shannon",
+       colour = "Restoration",
+       fill = "Restoration") +
+  theme_classic()
+
+
+simulationOutput <- simulateResiduals(fittedModel = mod_shannon_fac, plot = T)
+```
+
+```{r}
+#COMPARE AIC FOR MODEL VALIDATION - REDUNDANT ####
+m1 <- glmmTMB(
+  shannon ~ log(surface_water+1) + year_num*restauration+ site + (1|Subsite), #best for abundance + best for evenness (but is negative) + best for shannon
+  family = gaussian(),
+  data = glmm_df
+)
+
+m2 <- glmmTMB(
+  shannon ~ log(surface_water+1) + year_num *restauration+site+passage +(1|Subsite),  #best for richness
+  family = gaussian(),
+  data = glmm_df
+)
+
+m3 <- glmmTMB(
+  shannon ~ log(surface_water+1)+year_num*restauration+passage+(1|Subsite), 
+  family = gaussian(),
+  data = glmm_df
+)
+
+AIC(m1, m2, m3)
+```
+```{r}
+#TEST FOR SPATIAL-CORRELATION FOR 4 VARIABLES####
+
+models <- list(
+  abundance = mod_abundance_fac,
+  richness = mod_richness_fac,
+  eveness  = mod_eveness_fac,
+  shannon  = mod_shannon_fac
+)
+
+temporaire <- glmm_df[!duplicated(glmm_df$Subsite), ]
+
+results <- list()
+
+for(name in names(models)) {
+  
+  cat("### Testing spatial autocorrelation for", name, "###\n")
+  
+  sim_out <- simulateResiduals(models[[name]])
+  
+  sim_grouped <- recalculateResiduals(sim_out, group = temporaire$Subsite)
+  
+  test_result <- testSpatialAutocorrelation(sim_grouped, x = temporaire$lon, y = temporaire$lat, plot = TRUE)
+  
+  results[[name]] <- test_result
+  
+  print(test_result)
+}
+```
+```{r}
+# isolate ONLY species columns ONCE
+species_mat <- as.matrix(community_matrix_subsite[, -(c(1:16, (ncol(community_matrix_subsite)-2):ncol(community_matrix_subsite)))])
+
+sac <- specaccum(species_mat, method = "random")
+
+plot(sac, ci.type = "polygon", ci.col = "lightblue", col = "darkblue", lwd= 2, xlab = "Sampling Effort", ylab="Species Richness")
+```
+```{r}
+sac <- specaccum(species_mat, method = "random")
+
+plot(sac,
+     ci.type = "polygon",
+     ci.col = "lightblue",
+     col = "darkblue",
+     lwd = 2,
+     xlab = "Sampling Effort",
+     ylab = "Species Richness")
+
+# interpolate richness at exactly 100 surveys
+richness_100 <- approx(sac$sites, sac$richness, xout = 100)$y
+
+# percentage of total richness
+percent_100 <- (richness_100 / 96) * 100
+
+richness_100
+percent_100
+```
+
+```{r}
+community_matrix_subsite <- community_matrix_subsite %>%
+  mutate(site = str_replace_all(site, "Pourtour\\s*Rascaillan|PourtourRascaillan", "Pourtour"))
+
+#Site SAC with sampling effort = Subsites####
+
+# Get unique sites
+sites <- unique(community_matrix_subsite$site)
+
+# List to store SACs
+sac_list <- list()
+
+# Loop over each site
+for (s in sites) {
+  # Select subsites for this site
+  subsites_mat <- species_mat[community_matrix_subsite$site == s, ]
+  
+  # Make sure it's still a matrix if only one row
+  if (is.vector(subsites_mat)) {
+    subsites_mat <- matrix(subsites_mat, nrow = 1)
+  }
+  
+  # Species accumulation
+  sac_list[[s]] <- specaccum(subsites_mat, method = "random")
+}
+
+par(mfrow = c(2, 5)) # 2 rows, 5 columns if you have 10 sites
+
+for (s in sites) {
+  plot(sac_list[[s]], main = paste("Site", s), xlab = "Subsites", ylab = "Species")
+}
+```
+```{r}
+
+# List to store SACs
+sites <- unique(community_matrix_subsite$site)
+sac_year_list <- list()
+
+for (s in sites) {
+  # Select rows for this site
+  site_data <- community_matrix_subsite[community_matrix_subsite$site == s, ]
+  
+  # Extract only species columns (metadata = first 16 columns)
+  species_data <- site_data[, -(c(1:16, (ncol(site_data)-2):ncol(site_data)))]
+  
+  # Make sure species columns are numeric
+  species_data[] <- lapply(species_data, as.numeric)
+  
+  # Aggregate subsites by year
+  site_year_mat <- aggregate(species_data, by = list(year = site_data$year), FUN = sum)
+  
+  # Convert to matrix (rows = years, cols = species)
+  species_mat_year <- as.matrix(site_year_mat[, -1])  # drop the 'year' column
+  
+  # SAC over years (chronological order)
+  sac_year_list[[s]] <- specaccum(species_mat_year, method = "collector")
+}
+
+par(mfrow = c(2,5))
+for (s in sites) {
+  plot(sac_year_list[[s]], main = paste("Site", s),
+       xlab = "Year samples", ylab = "Species richness")
+}
+```
+```{r}
+# Get unique sites
+sites <- unique(community_matrix_subsite$site)
+
+for (s in sites) {
+  # Select data for this site
+  site_data <- community_matrix_subsite[community_matrix_subsite$site == s, ]
+  
+  # Remove rows with missing or empty passage
+  site_data <- site_data[!is.na(site_data$passage) & site_data$passage != "", ]
+  
+  # Skip this site if no valid rows
+  if (nrow(site_data) == 0) next
+  
+  # Determine passages present for this site
+  site_passages <- unique(site_data$passage)
+  
+  # List to store SACs for each passage
+  sac_passage_list <- list()
+  
+  for (p in site_passages) {
+    # Select data for this passage
+    passage_data <- site_data[site_data$passage == p, ]
+    
+    # Extract species columns (columns 16 onward)
+    species_data <- passage_data[, -(c(1:16, (ncol(passage_data)-2):ncol(passage_data)))]
+    species_data[] <- lapply(species_data, as.numeric)
+    
+    # Convert to matrix
+    species_mat <- as.matrix(species_data)
+    
+    # Only calculate SAC if at least one row exists
+    if (nrow(species_mat) > 0) {
+      sac_passage_list[[as.character(p)]] <- specaccum(species_mat, method = "collector")
+    }
+  }
+  
+  # Skip plotting if no valid passages
+  if (length(sac_passage_list) == 0) next
+  
+  # Assign colors: handle 1–2 passages manually
+  n_passages <- length(sac_passage_list)
+  if (n_passages == 1) {
+    colors <- "red"
+  } else if (n_passages == 2) {
+    colors <- c("red","blue")
+  } else {
+    colors <- RColorBrewer::brewer.pal(n_passages, "Set1")
+  }
+  
+  # Plot first passage
+  # Plot first passage
+plot(sac_passage_list[[1]]$sites, sac_passage_list[[1]]$richness, type = "l",
+     col = colors[1], lwd = 1,  # thin line
+     main = paste("Site", s),
+     xlab = "Sampling effort", ylab = "Species richness",
+     ylim = c(0, max(sapply(sac_passage_list, function(x) max(x$richness)))))
+
+
+# Overlay additional passages
+if (n_passages > 1) {
+  for (i in 2:n_passages) {
+    lines(sac_passage_list[[i]]$sites, sac_passage_list[[i]]$richness,
+          col = colors[i], lwd = 0.1)  # same thin line
+    
+  }
+}
+
+# Legend: match line width to plot
+legend("bottomright", legend = names(sac_passage_list), col = colors,
+       lwd = 1, pch = 16, title = "Passage")
+}
+```
+```{r}
+#YEAR*RESTORATION INTERACTION####
+df_shannon_num$metric <- "Shannon"
+df_richness_num$metric <- "Richness"
+df_even_num$metric <- "Evenness"
+df_abundance_num$metric <- "Abundance"
+
+df_num_all <- rbind(df_shannon_num, df_richness_num, df_even_num, df_abundance_num)
+
+
+df_shannon_fac$metric <- "Shannon"
+df_richness_fac$metric <- "Richness"
+df_even_fac$metric <- "Evenness"
+df_abundance_fac$metric <- "Abundance"
+
+df_fac_all <- rbind(df_shannon_fac, df_richness_fac, df_even_fac, df_abundance_fac)
+```
+
+```{r}
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_num_all,
+            aes(x = year_num, y = fit, colour = restauration),
+            linewidth = 1) +
+
+  geom_ribbon(data = df_num_all,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_fac_all,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  
+  geom_errorbar(data = df_fac_all,
+              aes(x = year_num, ymin = lower, ymax = upper, colour = restauration),
+              width = 0.2)+
+  
+  scale_x_continuous(breaks = min(glmm_df$year):max(glmm_df$year)) +
+
+  facet_wrap(~ metric, scales = "free_y") +
+
+  labs(x = "Year",
+       y = "Predicted value",
+       colour = "Restoration",
+       fill = "Restoration") +
+
+  theme_classic()
+```
+```{r}
+#SURFACE WATER####
+# --- Prepare dataframes for each index ---
+df_shannon <- as.data.frame(allEffects(mod_shannon_num)[[1]])
+df_shannon$metric <- "Shannon"
+
+df_evenness <- as.data.frame(allEffects(mod_eveness_num)[[1]])
+df_evenness$metric <- "Evenness"
+
+df_richness <- as.data.frame(allEffects(mod_richness_num)[[1]])
+df_richness$metric <- "Richness"
+
+df_abundance <- as.data.frame(allEffects(mod_abundance_num)[[1]])
+df_abundance$metric <- "Abundance"
+
+# --- Combine into one long dataframe ---
+df_surface_all <- rbind(df_shannon, df_evenness, df_richness, df_abundance)
+
+# ---- Significance stars ----
+get_p_surface <- function(model) {
+  a <- car::Anova(model)
+  a$`Pr(>Chisq)`[grep("surface_water", rownames(a))]
+}
+p_shannon   <- get_p_surface(mod_shannon_num)
+p_evenness  <- get_p_surface(mod_eveness_num)
+p_richness  <- get_p_surface(mod_richness_num)
+p_abundance <- get_p_surface(mod_abundance_num)
+
+get_stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) "***"
+  else if (p < 0.01) "**"
+  else if (p < 0.05) "*"
+  else ""
+}
+stars_df <- data.frame(
+  metric = c("Shannon", "Evenness", "Richness", "Abundance"),
+  stars = c(
+    get_stars(p_shannon),
+    get_stars(p_evenness),
+    get_stars(p_richness),
+    get_stars(p_abundance)
+  )
+)
+stars_df <- data.frame(
+  metric = c("Shannon", "Evenness", "Richness", "Abundance"),
+  stars = c(
+    get_stars(p_shannon),
+    get_stars(p_evenness),
+    get_stars(p_richness),
+    get_stars(p_abundance)
+  )
+)
+
+stars_df <- stars_df %>%
+  left_join(
+    df_surface_all %>%
+      group_by(metric) %>%
+      summarise(
+        x = max(log(surface_water + 1), na.rm = TRUE),
+        y = max(fit, na.rm = TRUE)
+      ),
+    by = "metric"
+  )
+
+
+# --- Plot ---
+ggplot(df_surface_all, aes(x = log(surface_water + 1), y = fit)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) +
+  
+  geom_text(
+    data = stars_df,
+    aes(label = stars),
+    x = Inf,
+    y = Inf,
+    hjust = 6,
+    vjust = 1.7,
+    size = 6,
+    inherit.aes = FALSE
+  ) +
+  
+  facet_wrap(~ metric, scales = "free_y") +
+  
+  scale_x_continuous(
+    name = "Surface Water (%)",
+    labels = function(x) round(x * 100, 1)
+  ) +
+  
+  theme_classic()
+
+```
+
+
+```{r}
+#CREATING ANOVA DATA FRAMES####
+
+#Eveness#
+anova_eveness <- as.data.frame(car::Anova(mod_eveness_num))
+anova_eveness$variable <- "eveness"
+anova_eveness$Chisq <- round(anova_eveness$Chisq,3)
+anova_eveness$`Pr(>Chisq)` <- round(anova_eveness$`Pr(>Chisq)`,3)
+
+#Shannon#
+anova_shannon <- as.data.frame(car::Anova(mod_shannon_num))
+anova_shannon$variable <- "shannon"
+anova_shannon$Chisq <- round(anova_shannon$Chisq,3)
+anova_shannon$`Pr(>Chisq)` <- round(anova_shannon$`Pr(>Chisq)`,3)
+
+#Richness#
+anova_richness <- as.data.frame(car::Anova(mod_richness_num))
+anova_richness$variable <- "richness"
+anova_richness$Chisq <- round(anova_richness$Chisq,3)
+anova_richness$`Pr(>Chisq)` <- round(anova_richness$`Pr(>Chisq)`,3)
+
+#Abundance#
+anova_abundance <- as.data.frame(car::Anova(mod_abundance_num))
+anova_abundance$variable <- "abundance"
+anova_abundance$Chisq <- round(anova_abundance$Chisq,3)
+anova_abundance$`Pr(>Chisq)` <- round(anova_abundance$`Pr(>Chisq)`,3)
+
+#Fix Predictor Column####
+anova_shannon$Predictor <- rownames(anova_shannon)
+rownames(anova_shannon) <- NULL
+
+anova_eveness$Predictor <- rownames(anova_eveness)
+rownames(anova_eveness) <- NULL
+
+anova_richness$Predictor <- rownames(anova_richness)
+rownames(anova_richness) <- NULL
+
+anova_abundance$Predictor <- rownames(anova_abundance)
+rownames(anova_abundance) <- NULL
+
+#Combine with rbind#
+anova_all <- rbind(
+  anova_eveness,
+  anova_shannon,
+  anova_richness,
+  anova_abundance
+)
+
+```
+
+```{r}
+anova_clean <- anova_all[, c("Chisq","Df","Pr(>Chisq)","variable","Predictor")]
+colnames(anova_clean) <- c("Chi-square","Df","p-value", "Index", "Predictor")
+
+format_p <- function(p) {
+  ifelse(p < 0.001, "<0.001", round(p, 3))
+}
+anova_clean$`p-value` <- format_p(anova_clean$`p-value`)
+
+anova_shannon_clean   <- subset(anova_clean, Index == "shannon")
+anova_eveness_clean   <- subset(anova_clean, Index == "eveness")
+anova_richness_clean  <- subset(anova_clean, Index == "richness")
+anova_abundance_clean <- subset(anova_clean, Index == "abundance")
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "Shannon")
+writeData(wb, "Shannon", anova_shannon_clean)
+
+addWorksheet(wb, "Evenness")
+writeData(wb, "Evenness", anova_eveness_clean)
+
+addWorksheet(wb, "Richness")
+writeData(wb, "Richness", anova_richness_clean)
+
+addWorksheet(wb, "Abundance")
+writeData(wb, "Abundance", anova_abundance_clean)
+
+saveWorkbook(wb, "ANOVA_results.xlsx", overwrite = TRUE)
+```
+
+```{r}
+#EMMEANS FOR POST_HOC####
+emtrends(mod_eveness_num,~ restauration,var=  "year_num")
+```
+```{r}
+emm_eveness <- emmeans(mod_eveness_fac, ~ year * restauration, type = "response")
+pairs_eveness <- pairs(emm_eveness, adjust = "bonferroni")
+pairs_eveness
+
+emm_shannon <- emmeans(mod_shannon_fac, ~ year*restauration, type = "response")
+pairs_shannon <- pairs(emm_shannon, adjust = "bonferroni")
+pairs_shannon
+
+emm_richness <- emmeans(mod_richness_fac, ~ year * restauration, type = "response")
+pairs_richness <- pairs(emm_richness, adjust = "bonferroni")
+pairs_richness
+
+emm_abundance <- emmeans(mod_abundance_fac, ~ year * restauration, type = "response")
+pairs_abundance <- pairs(emm_abundance, adjust = "bonferroni")
+pairs_abundance
+```
+
+```{r}
+#TESTING CLIMATE VARIABLES --> COVARIANCE####
+cor.test(glmm_df$cloudiness, glmm_df$visibility) #correlated
+cor.test(glmm_df$visibility, glmm_df$rain) # not correlated
+cor.test(glmm_df$surface_water, glmm_df$rain) #correlated
+cor.test(glmm_df$wind, glmm_df$cloudiness) #not correlated
+cor.test(glmm_df$wind, glmm_df$visibility) #not correlated
+```
+```{r}
+#SURFACE WATER####
+# --- Prepare dataframes for each index ---
+df_shannon <- as.data.frame(allEffects(mod_shannon_num)[[2]])
+df_shannon$metric <- "Shannon"
+
+df_evenness <- as.data.frame(allEffects(mod_eveness_num)[[2]])
+df_evenness$metric <- "Evenness"
+
+df_richness <- as.data.frame(allEffects(mod_richness_num)[[2]])
+df_richness$metric <- "Richness"
+
+df_abundance <- as.data.frame(allEffects(mod_abundance_num)[[2]])
+df_abundance$metric <- "Abundance"
+
+# --- Combine into one long dataframe ---
+df_surface_all <- rbind(df_shannon, df_evenness, df_richness, df_abundance)
+
+# ---- Significance stars ----
+get_p_surface <- function(model) {
+  a <- car::Anova(model)
+  a$`Pr(>Chisq)`[grep("cloudiness", rownames(a))]
+}
+p_shannon   <- get_p_surface(mod_shannon_num)
+p_evenness  <- get_p_surface(mod_eveness_num)
+p_richness  <- get_p_surface(mod_richness_num)
+p_abundance <- get_p_surface(mod_abundance_num)
+
+get_stars <- function(p) {
+  if (is.na(p)) return("")
+  if (p < 0.001) "***"
+  else if (p < 0.01) "**"
+  else if (p < 0.05) "*"
+  else if (p < 0.1) "."
+  else ""
+}
+stars_df <- data.frame(
+  metric = c("Shannon", "Evenness", "Richness", "Abundance"),
+  stars = c(
+    get_stars(p_shannon),
+    get_stars(p_evenness),
+    get_stars(p_richness),
+    get_stars(p_abundance)
+  )
+)
+stars_df <- data.frame(
+  metric = c("Shannon", "Evenness", "Richness", "Abundance"),
+  stars = c(
+    get_stars(p_shannon),
+    get_stars(p_evenness),
+    get_stars(p_richness),
+    get_stars(p_abundance)
+  )
+)
+
+stars_df <- stars_df %>%
+  left_join(
+    df_surface_all %>%
+      group_by(metric) %>%
+      summarise(
+        x = max(as.numeric(as.character(cloudiness))),
+        y = max(fit)
+      ),
+    by = "metric"
+  )
+
+
+# --- Plot ---
+library(ggplot2)
+
+ggplot(df_surface_all, aes(x = cloudiness, y = fit, group = 1)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  geom_text(
+  data = stars_df,
+  aes(label = stars),
+  x = Inf,
+  y = Inf,
+  hjust = 6,   
+  vjust = 1.7,
+  size = 6,
+  inherit.aes = FALSE
+) +
+  facet_wrap(~ metric, scales = "free_y") +
+  theme_classic()
+
+```
+```{r}
+targets <- c(25, 50, 75)
+
+effort_at_richness <- sapply(targets, function(t) {
+  sac$sites[min(which(sac$richness >= t))]
+})
+
+effort_at_richness
+```
+```{r}
+data.frame(
+  richness = targets,
+  effort = effort_at_richness
+)
+```
+```{r}
+diff_richness <- diff(sac$richness)
+diff_effort <- diff(sac$sites)
+
+marginal_gain <- diff_richness / diff_effort
+
+marginal_gain
+```
+
+```{r}
+target <- 0.8 * max(sac$richness)
+
+sac$sites[min(which(sac$richness >= target))]
+```
+```{r}
+species_cols <- colnames(community_matrix_subsite)[17:(ncol(community_matrix_subsite) - 1)]
+
+
+# STEP 1: take max across passages (per subsite)
+subsite_year <- community_matrix_subsite %>%
+  group_by(site, Subsite, year) %>%
+  summarise(across(all_of(species_cols), max, na.rm = TRUE),
+            .groups = "drop")
+
+# STEP 2: sum across subsites to get site-level
+site_year_matrix <- subsite_year %>%
+  group_by(site, year) %>%
+  summarise(across(all_of(species_cols), sum, na.rm = TRUE),
+            .groups = "drop")
+
+
+site_year_matrix$richness <- rowSums(site_year_matrix[, species_cols] > 0)
+
+site_year_richness <- site_year_matrix %>%
+  mutate(richness = rowSums(across(all_of(species_cols)) > 0)) %>%
+  select(site, year, richness)
+
+head(site_year_richness)
+```
+```{r}
+site_year_richness %>% 
+  filter(site == "Rascaillan")
+```
+```{r}
+site_year_richness %>% 
+  filter(site == "Val Agricola")
+```
+```{r}
+#FUNCTIONAL DIVERSITY####
+library(FD)
+library(ade4)
+
+#import functional trait dataset
+df_traits <- read_excel("C:/Users/Lenovo/Documents/BTR/Statistics/community_matrix_subsite_EG.xlsx", sheet = "Traits_storchova") # tableau avec les traits en colonne et espèces en ligne
+
+#Adding niche in camargue or LMCS to data:
+species_info <- read_excel("C:/Users/Lenovo/Documents/BTR/Bird_Data/Espece nicheur-revMT.xlsx")
+
+species_info <- species_info %>%
+  rename(
+    Species = Noms.Especes,
+    migrant = `Migrant/Vagrant`,
+    niche_lmcs = `Niche LMCS`,
+    niche_camargue = `Niche Camargue`
+  )
+
+
+
+df_traits <- df_traits %>%
+  left_join(species_info, by = "Species")
+
+#pick variables
+df_traits_clean <- as.data.frame(df_traits[,c("Wetland","Grassland","Shrubland","Forest", "Folivore_B", "Granivore_B","Other_invertebrates_B","Fish_B","Incubation_period","niche_camargue", "niche_lmcs")])
+rownames(df_traits_clean) <- df_traits$Species
+
+#determine number of axes
+traits.dist<-gowdis(df_traits_clean)  # utilisation de l'indice de gower pour faire la matrice de distance
+traits.pcoa=cailliez((traits.dist))
+pcoa_traits<-dudi.pco(traits.pcoa) # voir combien il faut garder d'axes (ici 4) 
+4
+
+#create PCoA
+PCOA1<-unlist(pcoa_traits$li[,1])
+PCOA2<-unlist(pcoa_traits$li[,2])
+PCOA3<-unlist(pcoa_traits$li[,3])
+PCOA4<-unlist(pcoa_traits$li[,4])
+
+traits_matrix<-cbind(PCOA1,PCOA2,PCOA3,PCOA4)
+
+rownames(traits_matrix) <- df_traits$Species
+
+
+#rownames(traits_matrix) <- rownames(df_traits_clean)
+
+#combine with abundance data
+data_abondance <- read_excel(
+  "C:/Users/Lenovo/Documents/BTR/Statistics/community_matrix_subsite_EG.xlsx",
+  sheet = "Data"
+) 
+
+#create the same species matrix with the appropriate amount of species, here called data_abondance
+data_abondance <- data_abondance[, -(c(1:16, ncol(data_abondance)))]# tableau avec les espèces en colonne
+data_abondance <- data_abondance[, rownames(traits_matrix)]
+
+data_abondance<-as.matrix(data_abondance)
+row_sums <- rowSums(data_abondance)
+data_abondance <- data_abondance[row_sums > 0, ] #remove rows with 0 observations
+
+FDall<-dbFD(traits_matrix,data_abondance)
+
+FRichness<-FDall$FRic
+FEvenness<-FDall$FEve
+FDivergence<-FDall$FDiv
+FSpecialization<-FDall$FSpe
+RaoQ <- FDall$RaoQ
+
+FDall
+```
+
+
+```{r}
+fd_df <- glmm_df %>%
+  mutate(
+    FRic = FDall$FRic,
+    FEve = FDall$FEve,
+    FDiv = FDall$FDiv,
+    FSpe = FDall$FSpe,
+    RaoQ = FDall$RaoQ
+  )
+
+fd_df <- fd_df %>%
+  mutate(
+    year_num = as.numeric(as.character(year)),
+    log_water = log(surface_water + 1)
+  )
+
+#FRIC GLMM####
+
+#abundance ~ log(surface_water+1) + year_num * restauration +
+#cloudiness + wind + julian_day + (1|site/Subsite)
+
+#fd_df <- fd_df %>%
+#  filter(!is.na(FRic))
+
+#numeric
+mod_FRic_num <- glmmTMB(
+  FRic ~ log(surface_water + 1) + year_num * restauration +
+    cloudiness + wind + julian_day,# +(1|site/Subsite),
+  family = gaussian(),
+  data = fd_df
+)
+
+#factor
+mod_FRic_fac <- glmmTMB(
+  FRic ~ log(surface_water + 1) + year * restauration +
+    cloudiness + wind + julian_day,# +(1|site/Subsite),
+  family = gaussian(),
+  data = fd_df
+)
+
+plot(allEffects(mod_FRic_fac), type="response")
+summary(mod_FRic_num)
+car::Anova(mod_FRic_num)
+
+
+# numeric year model
+df_FRic_num <- as.data.frame(allEffects(mod_FRic_num)[[5]])
+df_FRic_num$model <- "numeric"
+
+# factor year model
+df_FRic_fac <- as.data.frame(allEffects(mod_FRic_fac)[[5]])
+df_FRic_fac$model <- "factor"
+df_FRic_fac$year_num <- as.numeric(as.character(df_FRic_fac$year))
+
+
+
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_FRic_num,
+            aes(x = year_num, y = fit, colour = restauration),
+            size = 1) +
+
+  geom_ribbon(data = df_FRic_num,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_FRic_fac,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  geom_area() + scale_x_continuous(breaks=min(glmm_df$year):max(glmm_df$year))+
+  geom_errorbar(data = df_FRic_fac,
+              aes(x = year_num, ymin = lower, ymax = upper, colour = restauration),
+              width = 0.2)+
+  
+  labs(x = "Year",
+       y = "Predicted FRic",
+       colour = "Restoration",
+       fill = "Restoration") +
+  theme_classic()
+
+simulationOutput <- simulateResiduals(mod_FRic_num, plot = TRUE)
+```
+
+```{r}
+#FEVENNESS####
+
+#numeric
+mod_FEvenness_num <- glmmTMB(
+  FEvenness ~ log(surface_water + 1) + year_num * restauration +
+    cloudiness + wind + julian_day,# +(1|site/Subsite),
+  family = gaussian(),
+  data = fd_df
+)
+
+#factor
+mod_FEvenness_fac <- glmmTMB(
+  FEvenness ~ log(surface_water + 1) + year * restauration +
+    cloudiness + wind + julian_day,# +(1|site/Subsite),
+  family = gaussian(),
+  data = fd_df
+)
+
+plot(allEffects(mod_FEvenness_fac), type="response")
+summary(mod_FEvenness_num)
+car::Anova(mod_FEvenness_num)
+
+
+# numeric year model
+df_FEvenness_num <- as.data.frame(allEffects(mod_FEvenness_num)[[5]])
+df_FEvenness_num$model <- "numeric"
+
+# factor year model
+df_FEvenness_fac <- as.data.frame(allEffects(mod_FEvenness_fac)[[5]])
+df_FEvenness_fac$model <- "factor"
+df_FEvenness_fac$year_num <- as.numeric(as.character(df_FEvenness_fac$year))
+
+
+
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_FEvenness_num,
+            aes(x = year_num, y = fit, colour = restauration),
+            size = 1) +
+
+  geom_ribbon(data = df_FEvenness_num,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_FEvenness_fac,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  geom_area() + scale_x_continuous(breaks=min(glmm_df$year):max(glmm_df$year))+
+  geom_errorbar(data = df_FEvenness_fac,
+              aes(x = year_num, ymin = lower, ymax = upper, colour = restauration),
+              width = 0.2)+
+  
+  labs(x = "Year",
+       y = "Predicted FEvenness",
+       colour = "Restoration",
+       fill = "Restoration") +
+  theme_classic()
+
+simulationOutput <- simulateResiduals(mod_FEvenness_num, plot = TRUE)
+
+```
+```{r}
+#FDivergence GLMM####
+
+#CHECK JULIAN DAY AS NUMERIC
+
+#numeric
+mod_FDivergence_num <- glmmTMB(
+  FDivergence ~ log(surface_water + 1) + year_num * restauration +
+    cloudiness + wind + julian_day,# +(1|site/Subsite),
+  family = gaussian(),
+  data = fd_df
+)
+
+#factor
+mod_FDivergence_fac <- glmmTMB(
+  FDivergence ~ log(surface_water + 1) + year * restauration +
+    cloudiness + wind + julian_day,# +(1|site/Subsite),
+  family = gaussian(),
+  data = fd_df
+)
+
+plot(allEffects(mod_FDivergence_fac), type="response")
+summary(mod_FDivergence_num)
+car::Anova(mod_FDivergence_num)
+
+
+# numeric year model
+df_FDivergence_num <- as.data.frame(allEffects(mod_FDivergence_num)[[5]])
+df_FDivergence_num$model <- "numeric"
+
+# factor year model
+df_FDivergence_fac <- as.data.frame(allEffects(mod_FDivergence_fac)[[5]])
+df_FDivergence_fac$model <- "factor"
+df_FDivergence_fac$year_num <- as.numeric(as.character(df_FDivergence_fac$year))
+
+
+
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_FDivergence_num,
+            aes(x = year_num, y = fit, colour = restauration),
+            size = 1) +
+
+  geom_ribbon(data = df_FDivergence_num,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_FDivergence_fac,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  geom_area() + scale_x_continuous(breaks=min(glmm_df$year):max(glmm_df$year))+
+  geom_errorbar(data = df_FDivergence_fac,
+              aes(x = year_num, ymin = lower, ymax = upper, colour = restauration),
+              width = 0.2)+
+  
+  labs(x = "Year",
+       y = "Predicted FDivergence",
+       colour = "Restoration",
+       fill = "Restoration") +
+  theme_classic()
+
+simulationOutput <- simulateResiduals(mod_FDivergence_num, plot = TRUE)
+```
+```{r}
+#RaoQ GLMM####
+
+#numeric
+mod_RaoQ_num <- glmmTMB(
+  RaoQ ~ log(surface_water + 1) + year_num * restauration +
+    cloudiness + wind + julian_day, #(1|site/Subsite),
+  family = gaussian(),
+  data = fd_df
+)
+
+#factor
+mod_RaoQ_fac <- glmmTMB(
+  RaoQ ~ log(surface_water + 1) + year * restauration +
+    cloudiness + wind + julian_day, #(1|site/Subsite),
+  family = gaussian(),
+  data = fd_df
+)
+
+plot(allEffects(mod_RaoQ_fac), type="response")
+summary(mod_RaoQ_num)
+car::Anova(mod_RaoQ_num)
+
+
+# numeric year model
+df_RaoQ_num <- as.data.frame(allEffects(mod_RaoQ_num)[[5]])
+df_RaoQ_num$model <- "numeric"
+
+# factor year model
+df_RaoQ_fac <- as.data.frame(allEffects(mod_RaoQ_fac)[[5]])
+df_RaoQ_fac$model <- "factor"
+df_RaoQ_fac$year_num <- as.numeric(as.character(df_RaoQ_fac$year))
+
+
+
+ggplot() +
+  # --- NUMERIC MODEL (smooth trend) ---
+  geom_line(data = df_RaoQ_num,
+            aes(x = year_num, y = fit, colour = restauration),
+            size = 1) +
+
+  geom_ribbon(data = df_RaoQ_num,
+              aes(x = year_num, ymin = lower, ymax = upper, fill = restauration),
+              alpha = 0.2) +
+
+  # --- FACTOR MODEL (year-specific points) ---
+  geom_point(data = df_RaoQ_fac,
+             aes(x = year_num, y = fit, colour = restauration),
+             size = 2) +
+  geom_area() + scale_x_continuous(breaks=min(glmm_df$year):max(glmm_df$year))+
+  geom_errorbar(data = df_RaoQ_fac,
+              aes(x = year_num, ymin = lower, ymax = upper, colour = restauration),
+              width = 0.2)+
+  
+  labs(x = "Year",
+       y = "Predicted RaoQ",
+       colour = "Restoration",
+       fill = "Restoration") +
+  theme_classic()
+
+simulationOutput <- simulateResiduals(mod_RaoQ_num, plot = TRUE)
+```
+
+```{r}
+plot(PCOA1, PCOA2, pch = 19)
+text(PCOA1, PCOA2,
+     labels = rownames(traits_matrix),
+     cex = 0.6, pos = 3)
+```
+```{r}
+#PLOT PREDICTED ABUNDANCE AGAINST EVENNESS####
+# Evenness predictions (on response scale!)
+glmm_df$pred_evenness <- predict(mod_eveness_num, newdata = glmm_df, type = "response")
+
+# Abundance predictions
+glmm_df$pred_abundance <- predict(mod_abundance_num, newdata = glmm_df, type = "response")
+```
+

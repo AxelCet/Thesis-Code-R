@@ -1,0 +1,1318 @@
+---
+title: "DPCoA"
+output: html_document
+date: "2026-04-23"
+---
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(vegan)
+library(glmmTMB)
+library(DHARMa)
+library(effects)
+library(emmeans)
+library(openxlsx)
+library(car)
+library(ape)
+library(stringr)
+```
+
+
+```{r}
+#Import the bird data set using the read.csv command####
+#birds_2014 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/test.csv")
+birds_2015 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2015-ASSEMBLE.csv")
+birds_2016 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2016_assemble.csv")
+birds_2017 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2017_assemble.csv")
+birds_2018 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2018_assemble.csv")
+birds_2019 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2019-ASSEMBLE.csv")
+birds_2021 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2021.csv")
+birds_2024 <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data_New/STOC-EPS-2024-ASSEMBLE.csv")
+
+#Remove all extra columns void of information####
+#Compares left of %in% to the right, if matching, because of "!", the code returns it as FALSE and removes it from the dataframe.
+birds_2015 <- birds_2015[, !(names(birds_2015) %in% paste0("X.", 15))]
+birds_2016 <- birds_2016[, !(names(birds_2016) %in% paste0("X.", 15))]
+birds_2017 <- birds_2017[, !(names(birds_2017) %in% paste0("X.", 15))]
+birds_2018 <- birds_2018[, !(names(birds_2018) %in% paste0("X.", 15))]
+birds_2019 <- birds_2019[, !(names(birds_2019) %in% paste0("X.", 15))]
+birds_2021 <- birds_2021[, !(names(birds_2021) %in% paste0("X.", 15))]
+birds_2024 <- birds_2024[, !(names(birds_2024) %in% paste0("X.", 15))]
+
+#REMOVING TRANSIT DATA####
+#Create a function, create a loop, apply that function and save each year in a list
+remove_obs <- function(df, column) {
+  df[!df[[column]] %in% c("TOTAL", "Vol", "en chemin", ">200m","Vol (<200m)", ""),] #"Vol (<200m)" and "" or smth
+} #df is the dataframe, column is the columns the name of the column to filter by. Matches on both sides of the %in% and removes it due to the "!".
+
+#Create a list of all your yearly datasets, "data" is the name of the dataset, "col" is the desired column you would like to filter
+birds_list <- list(
+ # birds_2014 = list(data = birds_2014, col = "X.14"),
+  birds_2015 = list(data = birds_2015, col = "X.14"),
+  birds_2016 = list(data = birds_2016, col = "X.14"),
+  birds_2017 = list(data = birds_2017, col = "X.14"),
+  birds_2018 = list(data = birds_2018, col = "X.14"),
+  birds_2019 = list(data = birds_2019, col = "X.14"),
+  birds_2021 = list(data = birds_2021, col = "X.14"),
+  birds_2024 = list(data = birds_2024, col = "X.14")
+)
+
+for(i in names(birds_list)){
+  birds_list[[i]]$data <- remove_obs(birds_list[[i]]$data, birds_list[[i]]$col)
+}
+
+#names(birds_list) → gives the names of each list element: "birds_2014", "birds_2015", etc.
+  #for(i in names(birds_list)) → loops over each dataset.
+    #birds_list[[i]]$data → selects the dataframe for the current year.
+      #birds_list[[i]]$col → selects the column name to filter by.
+        #remove_obs(...) → applies the filtering function.
+          #<- → replaces the old dataframe with the cleaned version.
+
+new_colnames <- c(
+  "Subsite","Site","Type (Restauration active / passive / control)","julian_day",
+  "Date","Heure debut","1er ou 2e passage",
+  "cloudiness", "rain", "wind", "visibility", "surface_water",
+  "Observer Name","Department","Distance"
+)
+
+birds_list <- lapply(birds_list, function(x) {
+  names(x$data)[1:length(new_colnames)] <- new_colnames
+  return(x)
+})
+
+head(birds_list$birds_2015$data)
+```
+
+```{r}
+#Removing repeated header rows#### 
+
+#1. Extract the cleaned dataframes from the list
+cleaned_dfs <- lapply(birds_list, function(x) x$data)
+
+cleaned_dfs <- lapply(cleaned_dfs, function(df) {
+  df[-1, ]  # remove the first row
+})
+
+#2. Identify all columns across all years
+all_cols <- unique(unlist(lapply(cleaned_dfs, names)))
+
+#3. Ensure all dataframes have the same columns
+# If a column doesn’t exist in a year, fill with NA
+standardize_cols <- function(df, all_cols) {
+  missing_cols <- setdiff(all_cols, names(df))
+  if(length(missing_cols) > 0){
+    df[missing_cols] <- NA  # add missing columns
+  }
+  df <- df[all_cols]        # reorder columns consistently
+  return(df)
+}
+cleaned_dfs <- lapply(cleaned_dfs, standardize_cols, all_cols = all_cols)
+
+#4. Combine all years into a single dataset
+birds_all_years <- do.call(rbind, cleaned_dfs)
+
+birds_all_years$Subsite <- gsub("Platelet\\s+","Platelet", birds_all_years$Subsite)
+
+head(birds_all_years)
+```
+
+```{r}
+#Converting numeric weather variables####
+
+# Convert surface_water values to numeric
+birds_all_years$surface_water <- as.numeric(gsub("%", "", birds_all_years$surface_water)) / 100
+
+# Convert other weather columns to numeric
+climate_cols <- c("cloudiness", "rain", "wind", "visibility")
+birds_all_years[, climate_cols] <- lapply(birds_all_years[, climate_cols], function(x) as.numeric(as.character(x)))
+```
+
+```{r}
+#CREATING DATASET FOR SURFACE_WATER TREND ANALYSIS####
+
+# Ensure numeric and factor columns
+birds_all_years <- birds_all_years %>%
+  mutate(
+    Date = as.Date(Date, format="%m/%d/%Y"),
+    Site = as.factor(Site),
+    `1er ou 2e passage` = as.factor(`1er ou 2e passage`)
+  )
+birds_all_years <- birds_all_years %>%
+  mutate(
+    year = format(Date, "%Y"),
+    .after = Date
+  ) %>%
+  relocate(site = Site, passage = `1er ou 2e passage`, .after = year)
+
+birds_all_years <- birds_all_years %>%
+  filter(!is.na(year) & !is.na(Subsite))
+```
+
+```{r}
+library(tidyr)
+#Extracting Species Data into long format####
+
+# Metadata columns
+meta_names <- 1:16
+
+# Species columns
+species_cols <- (17:ncol(birds_all_years))
+
+birds_long <- birds_all_years %>%
+  pivot_longer(
+    cols = all_of(species_cols),
+    names_to = "species",
+    values_to = "abundance"
+  )
+birds_long <- birds_long %>%
+  mutate(
+    abundance = trimws(abundance),              # remove spaces
+    abundance = ifelse(abundance == "", NA, abundance),
+    abundance = as.numeric(abundance)           # convert to numeric
+  )
+
+```
+
+```{r}
+#REMOVING NON-BREEDING SPECIES####
+species_info <- read_excel("C:/Users/Lenovo/Documents/BTR/Bird_Data/Espece nicheur-revMT.xlsx")
+
+species_info <- species_info %>%
+  rename(
+    species = Noms.Especes,
+    migrant = `Migrant/Vagrant`
+  )
+
+birds_filtered <- birds_long %>%
+  left_join(species_info, by = "species")
+
+birds_filtered <- birds_filtered %>%
+  filter(!grepl("^1", migrant) | is.na(migrant))
+
+#line ID####
+birds_filtered <- birds_filtered %>%
+  mutate(line_id = paste(Subsite, Date, passage, sep = "_"))
+
+line_abundance <- birds_filtered %>%
+  group_by(line_id) %>%
+  summarise(
+    abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+```
+
+```{r}
+unique(birds_filtered$species)
+```
+```{r}
+#TRANSLATING BIRD SPECIES####
+species_translation <- c(
+  "Epervier.d.Europe" = "Eurasian Sparrowhawk",
+  "Rousserolle.turdoïde" = "Great Reed Warbler",
+  "Rousserolle.effarvatte" = "Eurasian Reed Warbler",
+  "Alouette.des.champs" = "Eurasian Skylark",
+  "Martin.pêcheur.d.Europe" = "Common Kingfisher",
+  "Perdrix.rouge" = "Red-legged Partridge",
+  "Canard.colvert" = "Mallard",
+  "Canard.chipeau" = "Gadwall",
+  "Pipit.rousseline" = "Tawny Pipit",
+  "Héron.cendré" = "Grey Heron",
+  "Héron.pourpré" = "Purple Heron",
+  "Crabier.chevelu" = "Squacco Heron",
+  "Héron.garde.bœufs" = "Cattle Egret",
+  "Oedicnème.criard" = "Eurasian Stone-curlew",
+  "Buse.variable" = "Common Buzzard",
+  "Linotte.mélodieuse" = "Common Linnet",
+  "Chardonneret.élégant" = "European Goldfinch",
+  "Bouscarle.de.Cetti" = "Cetti's Warbler",
+  "Gravelot.à.collier.interrompu" = "Kentish Plover",
+  "Busard.cendré" = "Montagu's Harrier",
+  "Cisticole.des.joncs" = "Zitting Cisticola",
+  "Coucou.geai" = "Great Spotted Cuckoo",
+  "Pigeon.ramier" = "Common Wood Pigeon",
+  "Corneille.noire" = "Carrion Crow",
+  "Coucou.gris" = "Common Cuckoo",
+  "Cygne.tuberculé" = "Mute Swan",
+  "Grande.Aigrette" = "Great Egret",
+  "Aigrette.garzette" = "Little Egret",
+  "Faucon.crécerelle" = "Common Kestrel",
+  "Foulque.macroule" = "Eurasian Coot",
+  "Gallinule.poule.d.eau" = "Common Moorhen",
+  "Cochevis.huppé" = "Crested Lark",
+  "Huîtrier.pie" = "Eurasian Oystercatcher",
+  "Echasse.blanche" = "Black-winged Stilt",
+  "Hypolaïs.polyglotte" = "Melodious Warbler",
+  "Hirondelle.rustique" = "Barn Swallow",
+  "Goéland.railleur" = "Slender-billed Gull",
+  "Mouette.mélanocéphale" = "Mediterranean Gull",
+  "Goéland.leucophée" = "Yellow-legged Gull",
+  "Mouette.rieuse" = "Black-headed Gull",
+  "Rossignol.philomèle" = "Common Nightingale",
+  "Guêpier.d.Europe" = "European Bee-eater",
+  "Bruant.proyer" = "Corn Bunting",
+  "Milan.noir" = "Black Kite",
+  "Bergeronnette.printanière" = "Western Yellow Wagtail",
+  "Nette.rousse" = "Red-crested Pochard",
+  "Bihoreau.gris" = "Black-crowned Night Heron",
+  "Loriot.d.Europe" = "Eurasian Golden Oriole",
+  "Mésange.charbonnière" = "Great Tit",
+  "Moineau.domestique" = "House Sparrow",
+  "Moineau.friquet" = "Eurasian Tree Sparrow",
+  "Grand.Cormoran" = "Great Cormorant",
+  "Faisan.de.Colchide" = "Common Pheasant",
+  "Flamant.rose" = "Greater Flamingo",
+  "Pie.bavarde" = "Eurasian Magpie",
+  "Spatule.blanche" = "Eurasian Spoonbill",
+  "Grèbe.huppé" = "Great Crested Grebe",
+  "Râle.d.eau" = "Water Rail",
+  "Avocette.élégante" = "Pied Avocet",
+  "Tarier.pâtre" = "European Stonechat",
+  "Sterne.naine" = "Little Tern",
+  "Sterne.pierregarin" = "Common Tern",
+  "Tourterelle.turque" = "Eurasian Collared Dove",
+  "Tourterelle.des.bois" = "European Turtle Dove",
+  "Etourneau.sansonnet" = "Common Starling",
+  "Fauvette.à.tête.noire" = "Eurasian Blackcap",
+  "Fauvette.à.lunettes" = "Spectacled Warbler",
+  "Fauvette.mélanocéphale" = "Sardinian Warbler",
+  "Grèbe.castagneux" = "Little Grebe",
+  "Tadorne.de.Belon" = "Common Shelduck",
+  "Chevalier.gambette" = "Common Redshank",
+  "Merle.noir" = "Common Blackbird",
+  "Huppe.fasciée" = "Eurasian Hoopoe",
+  "Sterne.Hansel" = "Gull-billed Tern",
+  "Vanneau.huppé" = "Northern Lapwing",
+  "Ibis.falcinelle" = "Glossy Ibis",
+  "Lusciniole.à.moustaches" = "Moustached Warbler",
+  "Caille.des.blés" = "Common Quail",
+  "Serin.cini" = "European Serin",
+  "Grand.duc.d.Europe" = "Eurasian Eagle-Owl",
+  "Talève.sultane" = "Purple Swamphen",
+  "Verdier.d.Europe" = "European Greenfinch",
+  "Blongios.nain" = "Little Bittern"
+)
+```
+
+
+
+```{r}
+species_by_line <- birds_filtered %>%
+  group_by(line_id, species) %>%
+  summarise(
+    abundance = sum(abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+community_matrix <- species_by_line %>%
+  pivot_wider(
+    names_from = species,
+    values_from = abundance,
+    values_fill = 0
+  )
+
+metadata <- birds_filtered %>%
+  select(
+    line_id,
+    Subsite,
+    `Type (Restauration active / passive / control)`,
+    julian_day,
+    Date,
+    year,
+    site,
+    passage,
+    `Heure debut`,
+    cloudiness,
+    rain,
+    wind,
+    visibility,
+    surface_water,
+    `Observer Name`,
+    Department
+  ) %>%
+  distinct(line_id, .keep_all = TRUE)
+
+line_ids <- metadata$line_id
+
+community_matrix_subsite <- metadata %>%
+  left_join(community_matrix, by = "line_id")
+
+community_matrix_subsite <- community_matrix_subsite %>%
+  mutate(
+    Subsite = str_trim(Subsite),                 # remove leading/trailing spaces
+    Subsite = str_replace_all(Subsite, "\\s+", ""),  # remove ALL spaces
+  Subsite = str_replace(Subsite, "^Enfores", "Enfor"),  # enfores → enfor
+    Subsite = str_replace(Subsite, "^Enfor(?=\\d)", "Enfor") # keep format clean
+    )
+
+community_matrix_subsite <- community_matrix_subsite %>%
+  mutate(
+    `Observer Name` = str_trim(`Observer Name`),
+    
+    `Observer Name` = case_when(
+      # Marc Thibault
+      `Observer Name` %in% c("M. Thibault", "Marc Thibault", "MTT", "M.Thibault") ~ "Marc Thibault",
+      # Yves Kayser
+      `Observer Name` %in% c("YK", "Yves Kayser") ~ "Yves Kayser",
+      # Thomas G
+      `Observer Name` %in% c("Thomas Galewski", "Galewski", "TGI", "Thomas G") ~ "Thomas G",
+      # TBN
+      `Observer Name` %in% c("TBN-Carole Leray", "TBN", "TBN + Aurore") ~ "TBN",
+            # Cohez
+      `Observer Name` %in% c("COHEZ", "D. Cohez", "Damien Cohez") ~ "Cohez",
+      
+      TRUE ~ `Observer Name`
+    )
+  )
+
+birds_2024 <- birds_2024[-1, ]
+names(birds_2024)[1] <- "Subsite"
+names(birds_2024)[3] <- "Type de Restauration"
+
+
+birds_2024 <- birds_2024 %>%
+  mutate(
+    `Type de Restauration` = case_when(
+      `Type de Restauration` %in% c("Témoin (Bélugue, DPM)") ~ "Control",
+      `Type de Restauration` == "Anciens salins - passif" ~ "Passive",
+      `Type de Restauration` == "Anciens salins - actif" ~ "Active",
+      `Type de Restauration` == "anciens salins - actif" ~ "Active",
+      TRUE ~ `Type de Restauration`  # keep everything else unchanged
+    )
+  )
+control <- birds_2024%>%
+  select(Subsite, `Type de Restauration`)
+
+control_unique <- control %>%
+  select(Subsite, `Type de Restauration`) %>%
+  distinct()
+
+community_matrix_subsite  <- left_join(community_matrix_subsite, control_unique, by = "Subsite")
+
+community_matrix_subsite <- community_matrix_subsite %>%
+  rename(restauration=`Type de Restauration` )
+
+
+#df_species_abtot <- data.frame(cbind(
+  #abundance = sort(colSums(community_matrix_subsite[,c(17:112)])),
+          # species = names(sort(colSums(community_matrix_subsite[,c(17:112)])))
+#  ))
+
+#species_tobe_removed <- df_species_abtot$species[df_species_abtot$abundance == 0]
+
+#community_matrix_subsite <- community_matrix_subsite[
+ # , !(colnames(community_matrix_subsite) %in% species_tobe_removed)
+#]
+
+
+#community_matrix_subsite <- community_matrix_subsite %>%
+  #filter(year != "2014")
+
+
+colSums(community_matrix_subsite[, 17:99], na.rm = TRUE) == 0
+
+coords <- read.csv("C:/Users/Lenovo/Documents/BTR/Bird_Data/Coordonnees Points STOC-EPS3_Lambert2étendu.csv")
+names(coords)[c(1,6)] <- c("Subsite", "cover")
+
+
+community_matrix_subsite <- merge(
+  community_matrix_subsite,
+  coords[, c("Subsite",
+                  "cover")],
+  by = "Subsite",
+  all.x = TRUE
+)
+
+community_matrix_subsite$cover <- as.numeric(
+  gsub("%", "", community_matrix_subsite$cover)
+) / 100
+
+community_matrix_subsite
+```
+
+```{r}
+species_mat <- as.matrix(
+  community_matrix_subsite[, -(c(1:16, tail(seq_len(ncol(community_matrix_subsite)), 2)))]
+)
+keep_rows <- rowSums(species_mat, na.rm = TRUE) > 0 # combinations with 0 obs don't work in bray
+
+species_mat <- species_mat[keep_rows, ]
+meta <- community_matrix_subsite[keep_rows, ]
+
+meta$surface_water_binom <- meta$surface_water 
+meta$surface_water_binom[meta$surface_water_binom>0] <- 1 
+meta$surface_water_binom[is.na(meta$surface_water_binom)] <- 0
+
+meta$cover_binom <- meta$cover 
+meta$cover_binom[meta$cover_binom>0.3] <- 1 
+meta$cover_binom[is.na(meta$cover_binom)] <- 0
+
+
+#meta$surface_water_binom[meta$surface_water <= 0.33] <- 0
+#meta$surface_water_binom[meta$surface_water > 0.33 & meta$surface_water <= 0.66] <- 1
+#meta$surface_water_binom[meta$surface_water > 0.66] <- 2
+#meta$surface_water_binom[is.na(meta$surface_water_binom)] <- 0
+species_mat[is.na(species_mat)] <- 0
+
+```
+
+START OF DPCOA ANALYSIS
+
+```{r}
+library(FD)
+library(ade4)
+
+#import functional trait dataset
+df_traits <- read_excel("C:/Users/Lenovo/Documents/BTR/Statistics/community_matrix_subsite_EG.xlsx", sheet = "Traits_storchova") # tableau avec les traits en colonne et espèces en ligne
+
+#Adding niche in camargue or LMCS to data:
+species_info <- read_excel("C:/Users/Lenovo/Documents/BTR/Bird_Data/Espece nicheur-revMT.xlsx")
+
+species_info <- species_info %>%
+  rename(
+    Species = Noms.Especes,
+    migrant = `Migrant/Vagrant`,
+    niche_lmcs = `Niche LMCS`,
+    niche_camargue = `Niche Camargue`
+  )
+
+
+
+df_traits <- df_traits %>%
+  left_join(species_info, by = "Species")
+
+#pick variables
+df_traits_clean <- as.data.frame(df_traits[,c("Wetland","Grassland","Shrubland","Forest", "Folivore_B", "Granivore_B","Other_invertebrates_B","Fish_B")]) #,"Incubation_period","niche_camargue", "niche_lmcs"
+rownames(df_traits_clean) <- df_traits$Species
+
+#determine number of axes
+traits.dist<-gowdis(df_traits_clean)  # utilisation de l'indice de gower pour faire la matrice de distance
+traits.pcoa=cailliez((traits.dist))
+pcoa_traits<-dudi.pco(traits.pcoa) # voir combien il faut garder d'axes (ici 4) 
+4
+
+#create PCoA
+PCOA1<-unlist(pcoa_traits$li[,1])
+PCOA2<-unlist(pcoa_traits$li[,2])
+PCOA3<-unlist(pcoa_traits$li[,3])
+PCOA4<-unlist(pcoa_traits$li[,4])
+
+traits_matrix<-cbind(PCOA1,PCOA2,PCOA3,PCOA4)
+
+rownames(traits_matrix) <- df_traits$Species
+
+
+#rownames(traits_matrix) <- rownames(df_traits_clean)
+
+#combine with abundance data
+# abundance matrix
+data_abondance <- species_mat
+
+# make sure it's a matrix
+data_abondance <- as.matrix(data_abondance)
+
+# keep only shared species
+common_species <- intersect(rownames(traits_matrix), colnames(data_abondance))
+
+traits_matrix <- traits_matrix[common_species, ]
+data_abondance <- data_abondance[, common_species]
+
+# remove empty sites
+row_sums <- rowSums(data_abondance, na.rm = TRUE)
+data_abondance <- data_abondance[row_sums > 0, ]
+
+# align metadata AFTER filtering
+line_ids <- line_ids[row_sums > 0]
+
+# remove species that are never observed
+species_totals <- colSums(data_abondance, na.rm = TRUE)
+
+data_abondance <- data_abondance[, species_totals > 0]
+
+# also filter traits accordingly
+traits_matrix <- traits_matrix[colnames(data_abondance), ]
+
+
+FDall<-dbFD(traits_matrix,data_abondance)
+
+FRichness<-FDall$FRic
+FEvenness<-FDall$FEve
+FDivergence<-FDall$FDiv
+FSpecialization<-FDall$FSpe
+
+FDall
+```
+
+```{r}
+line_ids <- meta$line_id
+line_id_species <- as.data.frame(data_abondance)
+line_id_species$line_id <- line_ids
+
+data_transposed <- line_id_species %>%
+  pivot_longer(
+    cols = -line_id,
+    names_to = "species",
+    values_to = "abundance"
+  ) %>%
+  pivot_wider(
+    names_from = line_id,
+    values_from = abundance
+  )
+
+library(tibble)
+
+df_traits_clean <- df_traits_clean %>%
+  rownames_to_column(var = "species")
+
+df_final <- df_traits_clean %>%
+  left_join(data_transposed, by = "species")
+```
+
+```{r}
+#abund <- as.matrix(df_final[,10:1352])
+#any(is.na(abund))
+```
+
+
+
+```{r}
+df_final <- df_final[rowSums(is.na(df_final[,10:1352])) < ncol(df_final[,10:1352]), ]
+
+test_bird_gow<-gowdis(df_final[,1:9])
+test_bird_gow_caillez=cailliez((test_bird_gow))
+tedbird <-  test_bird_gow_caillez
+tedbird[tedbird==0] <- 0.0001
+
+#test_birddbFD<-dbFD(traits_matrix,data_abondance)
+
+
+
+df_final[df_final < 0] <- 0
+sum(is.na(df_final))
+
+dpbird <- dpcoa(data.frame(t(sqrt(df_final[,10:1352]))), tedbird,nf=4
+                , scannf = FALSE,RaoDecomp = T)
+dpbird$eig[1:5]/sum(dpbird$eig)
+
+barplot(dpbird$eig / sum(dpbird$eig),
+        main = "Variance explained",
+        xlab = "Axes",
+        ylab = "Proportion")
+
+```
+
+
+```{r}
+rownames(dpbird$dls) <- df_final$species
+communities <- as.data.frame(dpbird$li)
+species <- as.data.frame(dpbird$dls)
+
+communities$line_id <- line_ids
+
+communities <- communities %>%
+  left_join(meta, by = "line_id")
+
+df_traits_clean
+
+communities$restauration <- as.factor(communities$restauration)
+communities$site <- as.factor(communities$site)
+communities$year <- as.factor(communities$year)
+```
+
+```{r}
+species_translation <- c(
+  "Epervier.d.Europe" = "Eurasian Sparrowhawk (Accipiter nisus)",
+  "Rousserolle.turdoïde" = "Great Reed Warbler (Acrocephalus arundinaceus)",
+  "Rousserolle.effarvatte" = "Eurasian Reed Warbler (Acrocephalus scirpaceus)",
+  "Alouette.des.champs" = "Eurasian Skylark (Alauda arvensis)",
+  "Martin.pêcheur.d.Europe" = "Common Kingfisher (Alcedo atthis)",
+  "Perdrix.rouge" = "Red-legged Partridge (Alectoris rufa)",
+  "Canard.colvert" = "Mallard (Anas platyrhynchos)",
+  "Canard.chipeau" = "Gadwall (Mareca strepera)",
+  "Pipit.rousseline" = "Tawny Pipit (Anthus campestris)",
+  "Héron.cendré" = "Grey Heron (Ardea cinerea)",
+  "Héron.pourpré" = "Purple Heron (Ardea purpurea)",
+  "Crabier.chevelu" = "Squacco Heron (Ardeola ralloides)",
+  "Héron.garde.bœufs" = "Cattle Egret (Bubulcus ibis)",
+  "Oedicnème.criard" = "Eurasian Stone-curlew (Burhinus oedicnemus)",
+  "Buse.variable" = "Common Buzzard (Buteo buteo)",
+  "Linotte.mélodieuse" = "Common Linnet (Linaria cannabina)",
+  "Chardonneret.élégant" = "European Goldfinch (Carduelis carduelis)",
+  "Bouscarle.de.Cetti" = "Cetti's Warbler (Cettia cetti)",
+  "Gravelot.à.collier.interrompu" = "Kentish Plover (Charadrius alexandrinus)",
+  "Busard.cendré" = "Montagu's Harrier (Circus pygargus)",
+  "Cisticole.des.joncs" = "Zitting Cisticola (Cisticola juncidis)",
+  "Coucou.geai" = "Great Spotted Cuckoo (Clamator glandarius)",
+  "Pigeon.ramier" = "Common Wood Pigeon (Columba palumbus)",
+  "Corneille.noire" = "Carrion Crow (Corvus corone)",
+  "Coucou.gris" = "Common Cuckoo (Cuculus canorus)",
+  "Cygne.tuberculé" = "Mute Swan (Cygnus olor)",
+  "Grande.Aigrette" = "Great Egret (Ardea alba)",
+  "Aigrette.garzette" = "Little Egret (Egretta garzetta)",
+  "Faucon.crécerelle" = "Common Kestrel (Falco tinnunculus)",
+  "Foulque.macroule" = "Eurasian Coot (Fulica atra)",
+  "Gallinule.poule.d.eau" = "Common Moorhen (Gallinula chloropus)",
+  "Cochevis.huppé" = "Crested Lark (Galerida cristata)",
+  "Huîtrier.pie" = "Eurasian Oystercatcher (Haematopus ostralegus)",
+  "Echasse.blanche" = "Black-winged Stilt (Himantopus himantopus)",
+  "Hypolaïs.polyglotte" = "Melodious Warbler (Hippolais polyglotta)",
+  "Hirondelle.rustique" = "Barn Swallow (Hirundo rustica)",
+  "Goéland.railleur" = "Slender-billed Gull (Chroicocephalus genei)",
+  "Mouette.mélanocéphale" = "Mediterranean Gull (Ichthyaetus melanocephalus)",
+  "Goéland.leucophée" = "Yellow-legged Gull (Larus michahellis)",
+  "Mouette.rieuse" = "Black-headed Gull (Chroicocephalus ridibundus)",
+  "Rossignol.philomèle" = "Common Nightingale (Luscinia megarhynchos)",
+  "Guêpier.d.Europe" = "European Bee-eater (Merops apiaster)",
+  "Bruant.proyer" = "Corn Bunting (Emberiza calandra)",
+  "Milan.noir" = "Black Kite (Milvus migrans)",
+  "Bergeronnette.printanière" = "Western Yellow Wagtail (Motacilla flava)",
+  "Nette.rousse" = "Red-crested Pochard (Netta rufina)",
+  "Bihoreau.gris" = "Black-crowned Night Heron (Nycticorax nycticorax)",
+  "Loriot.d.Europe" = "Eurasian Golden Oriole (Oriolus oriolus)",
+  "Mésange.charbonnière" = "Great Tit (Parus major)",
+  "Moineau.domestique" = "House Sparrow (Passer domesticus)",
+  "Moineau.friquet" = "Eurasian Tree Sparrow (Passer montanus)",
+  "Grand.Cormoran" = "Great Cormorant (Phalacrocorax carbo)",
+  "Faisan.de.Colchide" = "Common Pheasant (Phasianus colchicus)",
+  "Flamant.rose" = "Greater Flamingo (Phoenicopterus roseus)",
+  "Pie.bavarde" = "Eurasian Magpie (Pica pica)",
+  "Spatule.blanche" = "Eurasian Spoonbill (Platalea leucorodia)",
+  "Grèbe.huppé" = "Great Crested Grebe (Podiceps cristatus)",
+  "Râle.d.eau" = "Water Rail (Rallus aquaticus)",
+  "Avocette.élégante" = "Pied Avocet (Recurvirostra avosetta)",
+  "Tarier.pâtre" = "European Stonechat (Saxicola rubicola)",
+  "Sterne.naine" = "Little Tern (Sternula albifrons)",
+  "Sterne.pierregarin" = "Common Tern (Sterna hirundo)",
+  "Tourterelle.turque" = "Eurasian Collared Dove (Streptopelia decaocto)",
+  "Tourterelle.des.bois" = "European Turtle Dove (Streptopelia turtur)",
+  "Etourneau.sansonnet" = "Common Starling (Sturnus vulgaris)",
+  "Fauvette.à.tête.noire" = "Eurasian Blackcap (Sylvia atricapilla)",
+  "Fauvette.à.lunettes" = "Spectacled Warbler (Curruca conspicillata)",
+  "Fauvette.mélanocéphale" = "Sardinian Warbler (Curruca melanocephala)",
+  "Grèbe.castagneux" = "Little Grebe (Tachybaptus ruficollis)",
+  "Tadorne.de.Belon" = "Common Shelduck (Tadorna tadorna)",
+  "Chevalier.gambette" = "Common Redshank (Tringa totanus)",
+  "Merle.noir" = "Common Blackbird (Turdus merula)",
+  "Huppe.fasciée" = "Eurasian Hoopoe (Upupa epops)",
+  "Sterne.Hansel" = "Gull-billed Tern (Gelochelidon nilotica)",
+  "Vanneau.huppé" = "Northern Lapwing (Vanellus vanellus)",
+  "Ibis.falcinelle" = "Glossy Ibis (Plegadis falcinellus)",
+  "Lusciniole.à.moustaches" = "Moustached Warbler (Acrocephalus melanopogon)",
+  "Caille.des.blés" = "Common Quail (Coturnix coturnix)",
+  "Serin.cini" = "European Serin (Serinus serinus)",
+  "Grand.duc.d.Europe" = "Eurasian Eagle-Owl (Bubo bubo)",
+  "Talève.sultane" = "Purple Swamphen (Porphyrio porphyrio)",
+  "Verdier.d.Europe" = "European Greenfinch (Chloris chloris)",
+  "Blongios.nain" = "Little Bittern (Ixobrychus minutus)"
+)
+
+species$species_label <- species_translation[rownames(species)]
+
+species$species_label[is.na(species$species_label)] <- 
+  rownames(species)[is.na(species$species_label)]
+
+geom_text(data = species,
+          aes(x = Axis1, y = Axis2, label = species_label),
+          color = "red",
+          size = 2.5)
+
+species_table <- data.frame(
+  French = names(species_translation),
+  English_Latin = unname(species_translation)
+)
+
+head(species_table)
+```
+
+
+```{r}
+# rename axes
+colnames(communities)[1:2] <- c("Axis1", "Axis2")
+colnames(species)[1:2] <- c("Axis1", "Axis2")
+
+colnames(species)[1:4] <- c("Axis1", "Axis2", "Axis3", "Axis4")
+species$species_en <- species_translation[rownames(species)]
+
+
+ggplot() +
+  geom_point(data = communities, aes(x = Axis1, y = Axis2), color = "black") +
+  geom_text(data = species, aes(x = Axis1, y = Axis2, label = species_en),
+          color = "red", size = 2.5) +
+  theme_minimal() +
+  labs(title = "DPCoA", x = "Axis 1", y = "Axis 2")
+```
+```{r}
+length(unique(species$species_en))
+```
+```{r}
+species_table <- data.frame(
+  French = c(
+    "Epervier.d.Europe",
+    "Rousserolle.turdoïde",
+    "Rousserolle.effarvatte",
+    "Alouette.des.champs",
+    "Martin.pêcheur.d.Europe",
+    "Perdrix.rouge",
+    "Canard.colvert",
+    "Canard.chipeau",
+    "Pipit.rousseline",
+    "Héron.cendré",
+    "Héron.pourpré",
+    "Crabier.chevelu",
+    "Héron.garde.bœufs",
+    "Oedicnème.criard",
+    "Buse.variable",
+    "Linotte.mélodieuse",
+    "Chardonneret.élégant",
+    "Bouscarle.de.Cetti",
+    "Gravelot.à.collier.interrompu",
+    "Busard.cendré",
+    "Cisticole.des.joncs",
+    "Coucou.geai",
+    "Pigeon.ramier",
+    "Corneille.noire",
+    "Coucou.gris",
+    "Cygne.tuberculé",
+    "Grande.Aigrette",
+    "Aigrette.garzette",
+    "Faucon.crécerelle",
+    "Foulque.macroule",
+    "Gallinule.poule.d.eau",
+    "Cochevis.huppé",
+    "Huîtrier.pie",
+    "Echasse.blanche",
+    "Hypolaïs.polyglotte",
+    "Hirondelle.rustique",
+    "Goéland.railleur",
+    "Mouette.mélanocéphale",
+    "Goéland.leucophée",
+    "Mouette.rieuse",
+    "Rossignol.philomèle",
+    "Guêpier.d.Europe",
+    "Bruant.proyer",
+    "Milan.noir",
+    "Bergeronnette.printanière",
+    "Nette.rousse",
+    "Bihoreau.gris",
+    "Loriot.d.Europe",
+    "Mésange.charbonnière",
+    "Moineau.domestique",
+    "Moineau.friquet",
+    "Grand.Cormoran",
+    "Faisan.de.Colchide",
+    "Flamant.rose",
+    "Pie.bavarde",
+    "Spatule.blanche",
+    "Grèbe.huppé",
+    "Râle.d.eau",
+    "Avocette.élégante",
+    "Tarier.pâtre",
+    "Sterne.naine",
+    "Sterne.pierregarin",
+    "Tourterelle.turque",
+    "Tourterelle.des.bois",
+    "Etourneau.sansonnet",
+    "Fauvette.à.tête.noire",
+    "Fauvette.à.lunettes",
+    "Fauvette.mélanocéphale",
+    "Grèbe.castagneux",
+    "Tadorne.de.Belon",
+    "Chevalier.gambette",
+    "Merle.noir",
+    "Huppe.fasciée",
+    "Sterne.Hansel",
+    "Vanneau.huppé",
+    "Ibis.falcinelle",
+    "Lusciniole.à.moustaches",
+    "Caille.des.blés",
+    "Serin.cini",
+    "Grand.duc.d.Europe",
+    "Talève.sultane",
+    "Verdier.d.Europe",
+    "Blongios.nain"
+  ),
+  
+  English = c(
+    "Eurasian Sparrowhawk",
+    "Great Reed Warbler",
+    "Eurasian Reed Warbler",
+    "Eurasian Skylark",
+    "Common Kingfisher",
+    "Red-legged Partridge",
+    "Mallard",
+    "Gadwall",
+    "Tawny Pipit",
+    "Grey Heron",
+    "Purple Heron",
+    "Squacco Heron",
+    "Cattle Egret",
+    "Eurasian Stone-curlew",
+    "Common Buzzard",
+    "Common Linnet",
+    "European Goldfinch",
+    "Cetti's Warbler",
+    "Kentish Plover",
+    "Montagu's Harrier",
+    "Zitting Cisticola",
+    "Great Spotted Cuckoo",
+    "Common Wood Pigeon",
+    "Carrion Crow",
+    "Common Cuckoo",
+    "Mute Swan",
+    "Great Egret",
+    "Little Egret",
+    "Common Kestrel",
+    "Eurasian Coot",
+    "Common Moorhen",
+    "Crested Lark",
+    "Eurasian Oystercatcher",
+    "Black-winged Stilt",
+    "Melodious Warbler",
+    "Barn Swallow",
+    "Slender-billed Gull",
+    "Mediterranean Gull",
+    "Yellow-legged Gull",
+    "Black-headed Gull",
+    "Common Nightingale",
+    "European Bee-eater",
+    "Corn Bunting",
+    "Black Kite",
+    "Western Yellow Wagtail",
+    "Red-crested Pochard",
+    "Black-crowned Night Heron",
+    "Eurasian Golden Oriole",
+    "Great Tit",
+    "House Sparrow",
+    "Eurasian Tree Sparrow",
+    "Great Cormorant",
+    "Common Pheasant",
+    "Greater Flamingo",
+    "Eurasian Magpie",
+    "Eurasian Spoonbill",
+    "Great Crested Grebe",
+    "Water Rail",
+    "Pied Avocet",
+    "European Stonechat",
+    "Little Tern",
+    "Common Tern",
+    "Eurasian Collared Dove",
+    "European Turtle Dove",
+    "Common Starling",
+    "Eurasian Blackcap",
+    "Spectacled Warbler",
+    "Sardinian Warbler",
+    "Little Grebe",
+    "Common Shelduck",
+    "Common Redshank",
+    "Common Blackbird",
+    "Eurasian Hoopoe",
+    "Gull-billed Tern",
+    "Northern Lapwing",
+    "Glossy Ibis",
+    "Moustached Warbler",
+    "Common Quail",
+    "European Serin",
+    "Eurasian Eagle-Owl",
+    "Purple Swamphen",
+    "European Greenfinch",
+    "Little Bittern"
+  ),
+  
+  Latin = c(
+    "Accipiter nisus",
+    "Acrocephalus arundinaceus",
+    "Acrocephalus scirpaceus",
+    "Alauda arvensis",
+    "Alcedo atthis",
+    "Alectoris rufa",
+    "Anas platyrhynchos",
+    "Mareca strepera",
+    "Anthus campestris",
+    "Ardea cinerea",
+    "Ardea purpurea",
+    "Ardeola ralloides",
+    "Bubulcus ibis",
+    "Burhinus oedicnemus",
+    "Buteo buteo",
+    "Linaria cannabina",
+    "Carduelis carduelis",
+    "Cettia cetti",
+    "Charadrius alexandrinus",
+    "Circus pygargus",
+    "Cisticola juncidis",
+    "Clamator glandarius",
+    "Columba palumbus",
+    "Corvus corone",
+    "Cuculus canorus",
+    "Cygnus olor",
+    "Ardea alba",
+    "Egretta garzetta",
+    "Falco tinnunculus",
+    "Fulica atra",
+    "Gallinula chloropus",
+    "Galerida cristata",
+    "Haematopus ostralegus",
+    "Himantopus himantopus",
+    "Hippolais polyglotta",
+    "Hirundo rustica",
+    "Chroicocephalus genei",
+    "Ichthyaetus melanocephalus",
+    "Larus michahellis",
+    "Chroicocephalus ridibundus",
+    "Luscinia megarhynchos",
+    "Merops apiaster",
+    "Emberiza calandra",
+    "Milvus migrans",
+    "Motacilla flava",
+    "Netta rufina",
+    "Nycticorax nycticorax",
+    "Oriolus oriolus",
+    "Parus major",
+    "Passer domesticus",
+    "Passer montanus",
+    "Phalacrocorax carbo",
+    "Phasianus colchicus",
+    "Phoenicopterus roseus",
+    "Pica pica",
+    "Platalea leucorodia",
+    "Podiceps cristatus",
+    "Rallus aquaticus",
+    "Recurvirostra avosetta",
+    "Saxicola rubicola",
+    "Sternula albifrons",
+    "Sterna hirundo",
+    "Streptopelia decaocto",
+    "Streptopelia turtur",
+    "Sturnus vulgaris",
+    "Sylvia atricapilla",
+    "Curruca conspicillata",
+    "Curruca melanocephala",
+    "Tachybaptus ruficollis",
+    "Tadorna tadorna",
+    "Tringa totanus",
+    "Turdus merula",
+    "Upupa epops",
+    "Gelochelidon nilotica",
+    "Vanellus vanellus",
+    "Plegadis falcinellus",
+    "Acrocephalus melanopogon",
+    "Coturnix coturnix",
+    "Serinus serinus",
+    "Bubo bubo",
+    "Porphyrio porphyrio",
+    "Chloris chloris",
+    "Ixobrychus minutus"
+  ),
+  
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+species$species_label <- paste(
+  species_table$English[
+    match(rownames(species), species_table$French)
+  ],
+  "\n(",
+  species_table$Latin[
+    match(rownames(species), species_table$French)
+  ],
+  ")"
+)
+
+write.csv(species_table, "species.table.csv")
+```
+
+
+```{r}
+#Vegetation cover!!!#####
+vegetation_cover <- read.csv("C:/Users/Lenovo/Documents/BTR/Statistics/vegetation_cover_corr.csv")
+names(vegetation_cover)[2] <- "initial_cover"
+names(vegetation_cover)[3] <- "final_cover"
+
+setdiff(communities$Subsite, vegetation_cover$Subsite)
+setdiff(vegetation_cover$Subsite, communities$Subsite)
+length(intersect(communities$Subsite, vegetation_cover$Subsite))
+
+vegetation_cover$initial_cover <- as.numeric(gsub("%", "", vegetation_cover$initial_cover))
+vegetation_cover$final_cover <- as.numeric(gsub("%", "", vegetation_cover$final_cover))
+vegetation_cover$Change <- as.numeric(gsub("%", "", vegetation_cover$Change))
+
+library(dplyr)
+
+communities <- communities %>%
+  left_join(vegetation_cover, by = "Subsite")
+```
+
+```{r}
+eig <- dpbird$eig
+var_explained <- eig / sum(eig) * 100
+var_explained
+colnames(communities)[1:2] <- c("Axis1", "Axis2")
+x_lab <- paste0("DPCoA1 (", round(var_explained[1], 1), "%)")
+y_lab <- paste0("DPCoA2 (", round(var_explained[2], 1), "%)")
+
+
+vars <- c("restauration","year", "surface_water", "initial_cover")
+
+for (v in vars) {
+
+  centroids <- aggregate(
+    cbind(Axis1, Axis2) ~ get(v),
+    data = communities,
+    FUN = mean
+  )
+  colnames(centroids)[1] <- v
+
+  p <- ggplot(communities, aes(x = Axis1, y = Axis2, colour = .data[[v]])) +
+    geom_point(size = 2.5, alpha = 0.8) +
+    stat_ellipse(aes(group = .data[[v]]), level = 0.68, linewidth = 0.8) +
+    geom_point(data = centroids,
+               aes(x = Axis1, y = Axis2, colour = .data[[v]]),
+               size = 5, shape = 4, stroke = 1.5) +
+    theme_classic(base_size = 14) +
+    labs(
+      title = paste("DPCoA grouped by", v),
+      x = x_lab,
+      y = y_lab,
+      colour = v
+    )
+
+  print(p)
+}
+```
+```{r}
+#RESULTS FOR PAPER DPCOA####
+
+library(ggplot2)
+library(patchwork)
+communities$surface_water <- communities$surface_water *10
+
+label_names <- c(
+  restauration = "restoration",
+  year = "year",
+  surface_water = "surface water",
+  initial_cover = "initial vegetation"
+)
+
+vars <- c("restauration","year", "surface_water", "initial_cover")
+
+plot_list <- list()
+
+for (v in vars) {
+
+  p <- ggplot(communities, aes(x = Axis1, y = Axis2, colour = .data[[v]])) +
+    geom_point(size = 2.5, alpha = 0.8) +
+    theme_classic(base_size = 14) +
+    labs(
+  title = paste("Grouped by", label_names[v]),
+  x = x_lab,
+  y = y_lab,
+  colour = label_names[v]
+)
+
+  # Ellipses + centroids for categorical variables
+  if (v %in% c("restauration", "year")) {
+
+    centroids <- aggregate(
+      cbind(Axis1, Axis2) ~ get(v),
+      data = communities,
+      FUN = mean
+    )
+    colnames(centroids)[1] <- v
+
+    p <- p +
+      stat_ellipse(aes(group = .data[[v]]), level = 0.95, linewidth = 0.8) +
+      geom_point(data = centroids,
+                 aes(x = Axis1, y = Axis2, colour = .data[[v]]),
+                 size = 5, shape = 4, stroke = 1.5)
+  }
+
+  # ✅ Apply color scales AFTER creating the plot
+  if (v == "surface_water") {
+    p <- p + scale_colour_gradient(low ="#1B0078" , high = "#12cff3")
+  }
+
+  if (v == "initial_cover") {
+    p <- p + scale_colour_gradient(low = "#0b2c24", high = "#00ee6e")
+  }
+
+  plot_list[[v]] <- p
+}
+
+wrap_plots(plot_list, ncol = 2)
+```
+
+
+```{r}
+library(tidyr)
+
+communities_long <- communities %>%
+  pivot_longer(
+    cols = c(Axis1, Axis2),
+    names_to = "Axis",
+    values_to = "Score"
+  )
+
+ggplot(communities_long, aes(x = year, y = Score, fill = restauration)) +
+  geom_boxplot(alpha = 0.7) +
+  facet_wrap(~Axis, scales = "free_y") +
+  theme_classic() +
+  labs(
+    title = "DPCoA Axes by Year",
+    x = "Year",
+    y = "Score"
+  )
+```
+
+
+
+```{r}
+#PERMANOVA AXIS####
+library(vegan)
+
+# Build correct dataframe
+axes <- as.data.frame(dpbird$li[, 1:2])
+colnames(axes) <- c("Axis1", "Axis2")
+
+dpcoa_data <- cbind(communities, axes)
+
+keep <- complete.cases(dpcoa_data$Axis1,
+                       dpcoa_data$Axis2,
+                       dpcoa_data$restauration,
+                       dpcoa_data$year,
+                       dpcoa_data$surface_water,
+                       dpcoa_data$Change,
+                       dpcoa_data$initial_cover)
+
+dpcoa_clean <- dpcoa_data[keep, ]
+dist_dpcoa <- dist(dpcoa_clean[, c("Axis1", "Axis2")])
+
+#Run Permanova
+PERMANOVA_dpcoa <- adonis2(
+  dist_dpcoa ~ restauration * year+surface_water+initial_cover*Change, data = dpcoa_clean, by = "terms")
+
+PERMANOVA_dpcoa
+```
+
+```{r}
+#PAIRWISE PERMANOVA####
+library(vegan)
+library(dplyr)
+
+# 1. Convert RaoDis to matrix
+Rao <- as.matrix(dpbird$RaoDis)
+
+# 2. Remove rows/cols with NA
+keep <- complete.cases(Rao) &
+        complete.cases(communities) &
+        communities$surface_water != "n.a"
+
+Rao_clean <- Rao[keep, keep]
+meta_clean <- communities[keep, ]
+
+# 3. Define pairwise indices
+AC_idx <- meta_clean$restauration %in% c("Active", "Control")
+PC_idx <- meta_clean$restauration %in% c("Passive", "Control")
+AP_idx <- meta_clean$restauration %in% c("Active", "Passive")
+
+# 4. Subset distance matrices
+Rao_AC <- as.dist(Rao_clean[AC_idx, AC_idx])
+Rao_PC <- as.dist(Rao_clean[PC_idx, PC_idx])
+Rao_AP <- as.dist(Rao_clean[AP_idx, AP_idx])
+
+# 5. Subset metadata
+meta_AC <- meta_clean[AC_idx, ]
+meta_PC <- meta_clean[PC_idx, ]
+meta_AP <- meta_clean[AP_idx, ]
+
+
+
+
+# 6. Run PERMANOVA
+PERMANOVA_AC <- adonis2(Rao_AC ~ restauration * year+surface_water+initial_cover*Change,
+                        data = meta_AC,
+                        by = "terms")
+
+PERMANOVA_PC <- adonis2(Rao_PC ~ restauration * year+surface_water+initial_cover*Change,
+                        data = meta_PC,
+                        by = "terms")
+
+PERMANOVA_AP <- adonis2(Rao_AP ~ restauration * year+surface_water+initial_cover*Change,
+                        data = meta_AP,
+                        by = "terms")
+
+# Results
+PERMANOVA_AC
+PERMANOVA_PC
+PERMANOVA_AP
+```
+
+```{r}
+#PERMANOVA RAODIS####
+# 1. Convert RaoDis to matrix
+Rao <- as.matrix(dpbird$RaoDis)
+
+# 2. Identify rows WITHOUT any NA
+keep <- complete.cases(Rao) &
+        complete.cases(communities) &
+        communities$surface_water != "n.a"
+
+# 3. Subset distance matrix
+Rao_clean <- Rao[keep, keep]
+
+# 4. Subset metadata accordingly
+meta_clean <- communities[keep, ]
+
+# 5. Convert back to dist object
+Rao_clean <- as.dist(Rao_clean)
+
+# 6. Run PERMANOVA
+PERMANOVA_RAO <- adonis2(Rao_clean ~ restauration * year+surface_water+initial_cover*Change,
+                         data = meta_clean,
+                         by = "terms")
+
+PERMANOVA_RAO
+```
+```{r}
+#EXTRACTION OF PAIRWISE PERMANOVA RESULTS####
+library(broom)
+library(dplyr)
+
+#Extract clean results into data frames
+extract_adonis <- function(model, comparison_name) {
+  as.data.frame(model) %>%
+    tibble::rownames_to_column("term") %>%
+    mutate(comparison = comparison_name)
+}
+
+#Apply to all three
+AC_tab <- extract_adonis(PERMANOVA_AC, "AC")
+PC_tab <- extract_adonis(PERMANOVA_PC, "PC")
+AP_tab <- extract_adonis(PERMANOVA_AP, "AP")
+RAO_tab <- extract_adonis(PERMANOVA_RAO, "RAO")
+Axes_tab <- extract_adonis(PERMANOVA_dpcoa, "Axes")
+#Combine into one table
+final_table <- bind_rows(AC_tab, PC_tab, AP_tab, RAO_tab, Axes_tab)
+
+#Clean column names
+final_table <- final_table %>%
+  rename(
+    Df = Df,
+    SumOfSqs = SumOfSqs,
+    R2 = R2,
+    F = F,
+    p_value = `Pr(>F)`
+  )
+
+#Export to Excel
+library(openxlsx)
+
+write.xlsx(final_table, "PERMANOVA_results_pairwise.xlsx")
+```
+
+```{r}
+table_subsites <- meta[, c("Subsite", "restauration")]
+```
